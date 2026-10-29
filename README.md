@@ -2,6 +2,8 @@
 
 基于 **Electron + Vue 3 + Element Plus** 的跨平台桌面工具集，风格简洁，支持亮色 / 暗色两种主题，所有数据都在本地处理。
 
+![JSON 格式化](docs/screenshot-json-light.png)
+
 ## 功能
 
 | 工具 | 说明 |
@@ -18,6 +20,14 @@
 - 左侧导航可折叠：展开时显示图标 + 工具名称，折叠时只显示图标（悬停显示名称）
 - 一键切换亮色 / 暗色主题，主题、下载目录等设置持久化到用户配置目录
 - 侧边栏、窗口尺寸自适应，各工具页面切换时保留状态
+
+| 暗色主题 | API 请求 |
+| --- | --- |
+| ![暗色主题](docs/screenshot-json-dark.png) | ![API 请求](docs/screenshot-api.png) |
+
+| Markdown 编辑器 | 应用设置 |
+| --- | --- |
+| ![Markdown 编辑器](docs/screenshot-markdown.png) | ![应用设置](docs/screenshot-settings.png) |
 
 ## 技术栈
 
@@ -37,7 +47,13 @@ npm run build        # 类型检查 + 构建产物到 out/
 
 ## 打包
 
-产物输出到 `release/<version>/`：
+产物输出到 `release/<version>/`，Windows 实测产物：
+
+| 文件 | 说明 |
+| --- | --- |
+| `DevToolbox-1.0.0-win-setup.exe` | 多架构安装包（x64 + ARM64 + ia32 合一，自动选择） |
+| `DevToolbox-1.0.0-win-x64-setup.exe` | 单架构安装包（同理有 arm64 / ia32） |
+| `DevToolbox-1.0.0-win-x64.zip` | 免安装压缩包（同理有 arm64 / ia32） |
 
 ```bash
 # Windows：x86(ia32) / x64 / ARM64，产出 nsis 安装包与 zip 免安装包

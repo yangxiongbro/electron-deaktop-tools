@@ -3,8 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import AppSidebar from './components/AppSidebar.vue'
 import { TOOLS } from './tools'
-import { initSettings, setLastTool, setSidebarCollapsed, setTheme, useSettings } from './stores/settings'
-
+import { setLastTool, setSidebarCollapsed, setTheme, useSettings } from './stores/settings'
 const { settings } = useSettings()
 
 const currentId = ref('json')
@@ -27,7 +26,6 @@ function toggleSidebar(): void {
 }
 
 onMounted(async () => {
-  await initSettings()
   if (TOOLS.some((tool) => tool.id === settings.lastToolId)) {
     currentId.value = settings.lastToolId
   }

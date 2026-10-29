@@ -535,9 +535,9 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
       <div class="panel-header response-head">
         <span class="panel-title">响应</span>
         <template v-if="response">
-          <el-tag v-if="response.status" :type="statusType" size="small" effect="dark">
+          <span v-if="response.status" class="status-pill" :class="`is-${statusType}`">
             {{ response.status }} {{ response.statusText }}
-          </el-tag>
+          </span>
           <span class="small muted">耗时 {{ formatDuration(response.durationMs) }}</span>
           <span class="small muted">大小 {{ formatBytes(response.size) }}</span>
           <span v-if="response.contentType" class="small muted type-text">{{ response.contentType }}</span>
@@ -780,6 +780,35 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.2px;
+  flex: none;
+}
+
+.status-pill.is-success {
+  background: #16a34a;
+}
+
+.status-pill.is-info {
+  background: #0891b2;
+}
+
+.status-pill.is-warning {
+  background: #d97706;
+}
+
+.status-pill.is-danger {
+  background: #dc2626;
 }
 
 .response-tabs {
