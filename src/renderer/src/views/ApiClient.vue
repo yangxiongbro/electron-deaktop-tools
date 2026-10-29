@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  Clock,
   CopyDocument,
   Download,
   FolderOpened,
@@ -10,6 +11,7 @@ import {
   VideoPause
 } from '@element-plus/icons-vue'
 import type {
+  ApiHistoryEntry,
   AuthType,
   BodyType,
   FormRow,
@@ -17,6 +19,7 @@ import type {
   HttpBodyConfig,
   HttpMethod,
   HttpOptions,
+  HttpRequestConfig,
   HttpResponseResult,
   KeyValueRow,
   ResponseMode
@@ -24,6 +27,7 @@ import type {
 import KeyValueEditor from '../components/KeyValueEditor.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
 import JsonTree from '../components/JsonTree.vue'
+import ApiHistoryDrawer from '../components/ApiHistoryDrawer.vue'
 import { copyText } from '../utils/clipboard'
 import { formatBytes, formatDuration, randomId } from '../utils/format'
 import { buildHttpRequestConfig } from '../utils/http'
@@ -122,6 +126,8 @@ const progress = ref(0)
 const activeRequestId = ref('')
 const response = ref<HttpResponseResult | null>(null)
 const sentRequest = shallowRef<{ method: string; url: string; headers: KeyValueRow[] } | null>(null)
+const historyEntries = ref<ApiHistoryEntry[]>([])
+const historyOpen = ref(false)
 
 const methodColor = computed(() => {
   const map: Record<string, string> = {
@@ -218,12 +224,18 @@ async function send(): Promise<void> {
   response.value = null
   sentRequest.value = { method: state.method, url: state.url, headers: state.headers.map((row) => ({ ...row })) }
 
+  const requestConfig = buildHttpRequestConfig(state, requestId, outputPath, MAX_DISPLAY_BYTES)
+  let status: number | undefined
+  let ok = false
+  let durationMs = 0
+
   try {
-    const result = await window.api.http.request(
-      buildHttpRequestConfig(state, requestId, outputPath, MAX_DISPLAY_BYTES)
-    )
+    const result = await window.api.http.request(requestConfig)
     response.value = result
     progress.value = 100
+    status = result.status
+    ok = result.ok
+    durationMs = result.durationMs
     if (result.error) {
       ElMessage.error(result.error)
     } else if ((result.status ?? 0) >= 400) {
@@ -243,6 +255,86 @@ async function send(): Promise<void> {
   } finally {
     sending.value = false
     activeRequestId.value = ''
+    // 每次发送后自动记录，重复请求会更新时间并置顶
+    void rememberRequest(requestConfig, { status, ok, durationMs })
+  }
+}
+
+/** 把本次请求写入历史（相同请求自动去重） */
+async function rememberRequest(
+  config: HttpRequestConfig,
+  result: { status?: number; ok: boolean; durationMs: number }
+): Promise<void> {
+  try {
+    historyEntries.value = await window.api.history.add({
+      method: config.method,
+      url: config.url,
+      params: config.params,
+      headers: config.headers,
+      auth: config.auth,
+      body: config.body,
+      options: {
+        timeoutMs: config.options.timeoutMs,
+        followRedirects: config.options.followRedirects,
+        ignoreTlsErrors: config.options.ignoreTlsErrors,
+        responseMode: config.options.responseMode
+      },
+      status: result.status,
+      ok: result.ok,
+      durationMs: result.durationMs
+    })
+  } catch (error) {
+    console.error('[history] 保存请求记录失败', error)
+  }
+}
+
+/** 从历史记录回填表单 */
+function applyHistory(entry: ApiHistoryEntry): void {
+  state.method = entry.method
+  state.url = entry.url
+  state.params = entry.params.length
+    ? entry.params.map((row) => ({ ...row, id: randomId() }))
+    : [newRow()]
+  state.headers = entry.headers.length
+    ? entry.headers.map((row) => ({ ...row, id: randomId() }))
+    : [newRow()]
+  state.auth = { ...entry.auth }
+  state.body = {
+    ...entry.body,
+    form: entry.body.form.length ? entry.body.form.map((row) => ({ ...row, id: randomId() })) : [newFormRow()]
+  }
+  state.options = { ...state.options, ...entry.options }
+  requestTab.value = entry.body.type === 'none' ? 'params' : 'body'
+  historyOpen.value = false
+  response.value = null
+  sentRequest.value = null
+  ElMessage.success('已载入历史请求')
+}
+
+async function removeHistoryEntry(id: string): Promise<void> {
+  try {
+    historyEntries.value = await window.api.history.remove(id)
+  } catch (error) {
+    ElMessage.error(`删除失败：${(error as Error).message}`)
+  }
+}
+
+async function clearHistoryList(): Promise<void> {
+  if (historyEntries.value.length === 0) return
+  try {
+    await ElMessageBox.confirm('清空后无法恢复，确定要清空全部请求记录吗？', '清空请求历史', {
+      type: 'warning',
+      confirmButtonText: '清空',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  try {
+    historyEntries.value = await window.api.history.clear()
+    ElMessage.success('已清空请求历史')
+  } catch (error) {
+    ElMessage.error(`清空失败：${(error as Error).message}`)
   }
 }
 
@@ -316,11 +408,16 @@ function openSavedFile(): void {
 }
 
 let progressUnsubscribe: (() => void) | undefined
-onMounted(() => {
+onMounted(async () => {
   progressUnsubscribe = window.api.http.onProgress((payload) => {
     if (payload.requestId !== activeRequestId.value) return
     progress.value = payload.total > 0 ? Math.min(99, Math.round((payload.loaded / payload.total) * 100)) : 0
   })
+  try {
+    historyEntries.value = await window.api.history.list()
+  } catch (error) {
+    console.error('[history] 读取请求记录失败', error)
+  }
 })
 onUnmounted(() => progressUnsubscribe?.())
 
@@ -344,6 +441,9 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
       />
       <el-button v-if="!sending" type="primary" :icon="Promotion" class="send-btn" @click="send">发送</el-button>
       <el-button v-else type="danger" :icon="VideoPause" class="send-btn" @click="abort">取消</el-button>
+      <el-button :icon="Clock" @click="historyOpen = true">
+        请求列表<span v-if="historyEntries.length" class="history-count">{{ historyEntries.length }}</span>
+      </el-button>
       <el-button :icon="Refresh" @click="resetRequest">重置</el-button>
     </div>
 
@@ -629,12 +729,32 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
         <span>填写地址后点击「发送」，响应会显示在这里</span>
       </div>
     </section>
+
+    <ApiHistoryDrawer
+      v-model="historyOpen"
+      :entries="historyEntries"
+      @select="applyHistory"
+      @remove="removeHistoryEntry"
+      @clear="clearHistoryList"
+    />
   </div>
 </template>
 
 <style scoped>
 .api-page {
   gap: 10px;
+}
+
+.history-count {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 600;
 }
 
 .url-bar {

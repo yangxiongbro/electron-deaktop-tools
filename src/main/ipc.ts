@@ -14,8 +14,9 @@ import type {
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
-import { defaultDownloadDir, loadSettings, updateSettings } from './store'
-import type { HttpRequestConfig } from '@shared/types'
+import { addHistory, clearHistory, loadHistory, removeHistory } from './history'
+import { configDir, defaultDownloadDir, loadSettings, settingsFile, updateSettings } from './store'
+import type { ApiHistoryDraft, HttpRequestConfig } from '@shared/types'
 
 const MAX_TEXT_FILE_BYTES = 32 * 1024 * 1024
 
@@ -169,6 +170,16 @@ export function registerIpcHandlers(): void {
     abortHttpRequest(requestId)
   })
 
+  /* ----------------------------- 请求历史 --------------------------- */
+
+  ipcMain.handle('history:list', () => loadHistory())
+
+  ipcMain.handle('history:add', (_event, draft: ApiHistoryDraft) => addHistory(draft))
+
+  ipcMain.handle('history:remove', (_event, id: string) => removeHistory(id))
+
+  ipcMain.handle('history:clear', () => clearHistory())
+
   /* ----------------------------- 应用信息 -------------------------- */
 
   ipcMain.handle('app:info', (): AppInfo => {
@@ -183,7 +194,9 @@ export function registerIpcHandlers(): void {
       arch: process.arch,
       v8: process.versions.v8 ?? '',
       userDataPath: app.getPath('userData'),
-      defaultDownloadDir: defaultDownloadDir()
+      defaultDownloadDir: defaultDownloadDir(),
+      configDir: configDir(),
+      settingsFile: settingsFile()
     }
   })
 

@@ -321,6 +321,12 @@ body {
   font-family: inherit;
 }
 
+/* 请求列表抽屉：去掉默认内边距，让列表自己控制布局 */
+.history-drawer .el-drawer__body {
+  padding: 0;
+  overflow: hidden;
+}
+
 /* 过渡 */
 .fade-enter-active,
 .fade-leave-active {

@@ -198,6 +198,36 @@ export interface HttpProgress {
 }
 
 /* ------------------------------------------------------------------ */
+/* API 请求历史                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface ApiHistoryOptions {
+  timeoutMs: number
+  followRedirects: boolean
+  ignoreTlsErrors: boolean
+  responseMode: ResponseMode
+}
+
+/** 一次请求的完整快照，保存下来可在「请求列表」中直接回填 */
+export interface ApiHistoryEntry {
+  id: string
+  method: HttpMethod
+  url: string
+  params: KeyValueRow[]
+  headers: KeyValueRow[]
+  auth: HttpAuthConfig
+  body: HttpBodyConfig
+  options: ApiHistoryOptions
+  /** 最近一次发送的结果（仅用于展示） */
+  status?: number
+  ok?: boolean
+  durationMs?: number
+  createdAt: number
+}
+
+export type ApiHistoryDraft = Omit<ApiHistoryEntry, 'id' | 'createdAt'>
+
+/* ------------------------------------------------------------------ */
 /* 应用信息                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -212,6 +242,10 @@ export interface AppInfo {
   v8: string
   userDataPath: string
   defaultDownloadDir: string
+  /** 配置文件所在目录（打包后优先为安装目录） */
+  configDir: string
+  /** 配置文件完整路径 */
+  settingsFile: string
 }
 
 /* ------------------------------------------------------------------ */
@@ -241,6 +275,12 @@ export interface DesktopApi {
     request(config: HttpRequestConfig): Promise<HttpResponseResult>
     abort(requestId: string): Promise<void>
     onProgress(cb: (p: HttpProgress) => void): () => void
+  }
+  history: {
+    list(): Promise<ApiHistoryEntry[]>
+    add(entry: ApiHistoryDraft): Promise<ApiHistoryEntry[]>
+    remove(id: string): Promise<ApiHistoryEntry[]>
+    clear(): Promise<ApiHistoryEntry[]>
   }
   app: {
     info(): Promise<AppInfo>

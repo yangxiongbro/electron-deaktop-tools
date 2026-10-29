@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
+  ApiHistoryDraft,
+  ApiHistoryEntry,
   AppSettings,
   DesktopApi,
   HttpProgress,
@@ -50,6 +52,12 @@ const api: DesktopApi = {
       ipcRenderer.on('http:progress', handler)
       return () => ipcRenderer.removeListener('http:progress', handler)
     }
+  },
+  history: {
+    list: () => ipcRenderer.invoke('history:list') as Promise<ApiHistoryEntry[]>,
+    add: (entry: ApiHistoryDraft) => ipcRenderer.invoke('history:add', entry) as Promise<ApiHistoryEntry[]>,
+    remove: (id: string) => ipcRenderer.invoke('history:remove', id) as Promise<ApiHistoryEntry[]>,
+    clear: () => ipcRenderer.invoke('history:clear') as Promise<ApiHistoryEntry[]>
   },
   app: {
     info: () => ipcRenderer.invoke('app:info'),

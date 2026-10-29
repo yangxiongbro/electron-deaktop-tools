@@ -21,9 +21,10 @@ async function openDir(): Promise<void> {
   if (error) ElMessage.error(`无法打开目录：${error}`)
 }
 
-async function openUserData(): Promise<void> {
+async function openConfigDir(): Promise<void> {
   if (!info.value) return
-  await window.api.app.openPath(info.value.userDataPath)
+  const error = await window.api.app.openPath(info.value.configDir)
+  if (error) ElMessage.error(`无法打开目录：${error}`)
 }
 
 function applyTheme(theme: ThemeMode): void {
@@ -100,7 +101,7 @@ onMounted(async () => {
         <div class="about-grid">
           <div class="about-item">
             <span class="about-label">应用版本</span>
-            <span class="about-value mono">v{{ info?.version ?? '1.0.0' }}</span>
+            <span class="about-value mono">v{{ info?.version ?? '1.0.1' }}</span>
           </div>
           <div class="about-item">
             <span class="about-label">Electron</span>
@@ -125,8 +126,13 @@ onMounted(async () => {
         </div>
 
         <div class="dir-row">
-          <el-input :model-value="info?.userDataPath ?? ''" readonly />
-          <el-button :icon="FolderOpened" :disabled="!info" @click="openUserData">打开配置目录</el-button>
+          <el-input :model-value="info?.settingsFile ?? ''" readonly />
+          <el-button :icon="FolderOpened" :disabled="!info" @click="openConfigDir">打开配置目录</el-button>
+        </div>
+
+        <div class="about-note muted small">
+          配置文件（settings.json）与请求历史（api-history.json）默认保存在<strong>安装目录</strong>；若安装目录不可写（如安装到
+          Program Files），会自动改用用户数据目录。
         </div>
 
         <div class="about-note muted small">
