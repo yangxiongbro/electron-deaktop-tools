@@ -103,7 +103,9 @@ npm run build:unpack
 
 ## 常见问题
 
+- **安装时提示 `NSIS Error: Error writing temporary file. Make sure your temp folder is valid.`**：这是安装包所在目录被系统策略/安全软件限制导致的 —— 从受限目录（例如受管控的工作区、只读目录、被沙箱接管的路径）启动 NSIS 安装器时，它无法把自身解压到系统临时目录。把 `DevToolbox-*-setup.exe` 复制到普通目录（如 `下载`、`D:\Temp`）后再双击运行即可；也可以直接使用免安装的 `DevToolbox-*-win-*.zip`，解压后运行 `DevToolbox.exe`。
 - **Windows 打包报 `winCodeSign` 解压失败（`Cannot create symbolic link`）**：electron-builder 的工具链压缩包里包含 macOS 符号链接，Windows 上需要"创建符号链接"权限（以管理员运行，或在系统设置中开启"开发者模式"）。也可以先手动解压一次该工具链到 `ELECTRON_BUILDER_CACHE` 指向的 `winCodeSign/winCodeSign-2.6.0` 目录，再重新执行打包命令。
 - **打包时 `!tempfile: Unable to create temporary file`**：NSIS 需要可写的临时目录，请确保 `TEMP`/`TMP` 指向可写路径。
 - **`npm run build:linux` 在 Windows 上失败**：Linux 的 `deb`/`AppImage` 需要 Linux 工具链，请在 Linux 或容器中执行。
+
 
