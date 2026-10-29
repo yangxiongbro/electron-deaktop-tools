@@ -1,0 +1,41 @@
+{
+  "name": "electron-deaktop-tools",
+  "version": "1.0.0",
+  "description": "跨平台桌面工具箱：JSON 格式化、命名规范转换、编码解码、API 请求、Markdown 编辑器",
+  "main": "./out/main/index.js",
+  "author": "electron-deaktop-tools",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build": "npm run typecheck && electron-vite build",
+    "build:unpack": "npm run build && electron-builder --dir",
+    "build:win": "npm run build && electron-builder --win --x64 --ia32 --arm64",
+    "build:win:x64": "npm run build && electron-builder --win --x64",
+    "build:linux": "npm run build && electron-builder --linux --x64 --arm64",
+    "build:linux:armv7l": "npm run build && electron-builder --linux --armv7l",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "@types/crypto-js": "^4.2.2",
+    "@types/markdown-it": "^14.1.1",
+    "@types/node": "^20.14.10",
+    "@vitejs/plugin-vue": "^5.0.5",
+    "crypto-js": "^4.2.0",
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "element-plus": "^2.7.8",
+    "highlight.js": "^11.10.0",
+    "markdown-it": "^14.1.0",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3",
+    "vue": "^3.4.31",
+    "vue-tsc": "^2.0.26"
+  }
+}

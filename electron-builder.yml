@@ -1,0 +1,49 @@
+appId: com.electron.deaktoptools
+productName: DevToolbox
+copyright: Copyright © 2026 electron-deaktop-tools
+
+directories:
+  buildResources: build
+  output: release/${version}
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/{.eslintrc,.editorconfig,.prettierrc,README.md,README}'
+
+asar: true
+compression: normal
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
+win:
+  executableName: DevToolbox
+  icon: build/icon.ico
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  target:
+    - nsis
+    - zip
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DevToolbox
+  deleteAppDataOnUninstall: false
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+
+linux:
+  icon: build/icons
+  category: Development
+  executableName: devtoolbox
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  target:
+    - AppImage
+    - deb
+
+appImage:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
