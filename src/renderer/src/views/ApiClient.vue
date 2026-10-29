@@ -26,6 +26,7 @@ import SegmentedControl from '../components/SegmentedControl.vue'
 import JsonTree from '../components/JsonTree.vue'
 import { copyText } from '../utils/clipboard'
 import { formatBytes, formatDuration, randomId } from '../utils/format'
+import { buildHttpRequestConfig } from '../utils/http'
 
 interface RequestState {
   method: HttpMethod
@@ -218,23 +219,9 @@ async function send(): Promise<void> {
   sentRequest.value = { method: state.method, url: state.url, headers: state.headers.map((row) => ({ ...row })) }
 
   try {
-    const result = await window.api.http.request({
-      requestId,
-      method: state.method,
-      url: state.url.trim(),
-      params: state.params,
-      headers: state.headers,
-      auth: state.auth,
-      body: state.body,
-      options: {
-        timeoutMs: state.options.timeoutMs,
-        followRedirects: state.options.followRedirects,
-        ignoreTlsErrors: state.options.ignoreTlsErrors,
-        responseMode: state.options.responseMode,
-        outputPath,
-        maxDisplayBytes: MAX_DISPLAY_BYTES
-      }
-    })
+    const result = await window.api.http.request(
+      buildHttpRequestConfig(state, requestId, outputPath, MAX_DISPLAY_BYTES)
+    )
     response.value = result
     progress.value = 100
     if (result.error) {
