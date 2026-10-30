@@ -58,6 +58,19 @@ export function defaultDownloadDir(): string {
   }
 }
 
+function normalizeContentTypes(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback]
+  const result: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const trimmed = item.trim()
+    if (!trimmed || result.includes(trimmed)) continue
+    result.push(trimmed)
+    if (result.length >= 60) break
+  }
+  return result.length ? result : [...fallback]
+}
+
 function normalize(raw: Partial<AppSettings>, fallback: AppSettings): AppSettings {
   const theme: ThemeMode = raw.theme === 'dark' ? 'dark' : raw.theme === 'light' ? 'light' : fallback.theme
   return {
@@ -65,7 +78,11 @@ function normalize(raw: Partial<AppSettings>, fallback: AppSettings): AppSetting
     downloadDir:
       typeof raw.downloadDir === 'string' && raw.downloadDir.trim() ? raw.downloadDir : fallback.downloadDir,
     sidebarCollapsed: typeof raw.sidebarCollapsed === 'boolean' ? raw.sidebarCollapsed : fallback.sidebarCollapsed,
-    lastToolId: typeof raw.lastToolId === 'string' && raw.lastToolId ? raw.lastToolId : fallback.lastToolId
+    lastToolId: typeof raw.lastToolId === 'string' && raw.lastToolId ? raw.lastToolId : fallback.lastToolId,
+    apiAutoSave: typeof raw.apiAutoSave === 'boolean' ? raw.apiAutoSave : fallback.apiAutoSave,
+    apiContentTypes: normalizeContentTypes(raw.apiContentTypes, fallback.apiContentTypes),
+    apiSidebarCollapsed:
+      typeof raw.apiSidebarCollapsed === 'boolean' ? raw.apiSidebarCollapsed : fallback.apiSidebarCollapsed
   }
 }
 

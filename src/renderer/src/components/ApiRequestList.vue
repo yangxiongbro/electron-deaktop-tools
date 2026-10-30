@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { CopyDocument, Delete, FolderOpened, Search } from '@element-plus/icons-vue'
+import { CopyDocument, Delete, Expand, Fold, FolderOpened, Search } from '@element-plus/icons-vue'
 import type { ApiRequestRecord } from '@shared/types'
 import { formatDuration } from '../utils/format'
 
@@ -13,6 +13,8 @@ const props = defineProps<{
   dirtyId: string
   /** 数据文件完整路径，用于提示数据保存在哪里 */
   dataFile: string
+  /** 是否折叠为窄条 */
+  collapsed?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -20,6 +22,7 @@ const emit = defineEmits<{
   (event: 'duplicate', id: string): void
   (event: 'remove', id: string): void
   (event: 'reveal'): void
+  (event: 'toggle'): void
 }>()
 
 const query = ref('')
@@ -51,6 +54,20 @@ function methodColor(method: string): string {
   return METHOD_COLORS[method] ?? '#64748b'
 }
 
+/** 折叠态只显示一个字符，保证窄条里也能区分方法 */
+function methodShort(method: string): string {
+  const map: Record<string, string> = {
+    GET: 'G',
+    POST: 'P',
+    PUT: 'U',
+    PATCH: 'A',
+    DELETE: 'D',
+    HEAD: 'H',
+    OPTIONS: 'O'
+  }
+  return map[method] ?? method.slice(0, 1)
+}
+
 function statusClass(status?: number): string {
   if (!status) return 'unknown'
   if (status < 300) return 'success'
@@ -76,8 +93,8 @@ function formatTime(timestamp: number): string {
 </script>
 
 <template>
-  <section class="panel request-list">
-    <header class="panel-header">
+  <section class="panel request-list" :class="{ collapsed }">
+    <header v-if="!collapsed" class="panel-header">
       <span class="panel-title">请求列表</span>
       <span class="count">{{ requests.length }}</span>
       <span class="spacer" />
@@ -89,9 +106,19 @@ function formatTime(timestamp: number): string {
         :prefix-icon="Search"
         clearable
       />
+      <button class="icon-toggle" type="button" title="折叠请求列表" @click="emit('toggle')">
+        <el-icon :size="14"><Fold /></el-icon>
+      </button>
     </header>
 
-    <div class="list-body">
+    <header v-else class="rail-header">
+      <button class="icon-toggle" type="button" title="展开请求列表" @click="emit('toggle')">
+        <el-icon :size="14"><Expand /></el-icon>
+      </button>
+      <span class="count">{{ requests.length }}</span>
+    </header>
+
+    <div v-if="!collapsed" class="list-body">
       <div v-if="requests.length === 0" class="list-empty">
         <span>当前项目还没有请求</span>
         <span class="tip">点击右上角「新请求」创建第一条请求记录</span>
@@ -140,11 +167,40 @@ function formatTime(timestamp: number): string {
       </div>
     </div>
 
-    <footer class="list-footer">
+    <div v-else class="rail-body">
+      <el-tooltip
+        v-for="item in filtered"
+        :key="item.id"
+        :content="`${item.method} ${item.name}`"
+        placement="right"
+        :show-after="120"
+      >
+        <button
+          class="rail-item"
+          :class="{ active: item.id === currentId }"
+          type="button"
+          @click="emit('select', item.id)"
+        >
+          <span class="rail-method" :style="{ color: methodColor(item.method) }">{{ methodShort(item.method) }}</span>
+          <span v-if="item.id === dirtyId" class="rail-dot" />
+        </button>
+      </el-tooltip>
+      <div v-if="requests.length === 0" class="rail-empty">空</div>
+    </div>
+
+    <footer v-if="!collapsed" class="list-footer">
       <el-icon :size="13" class="footer-icon"><FolderOpened /></el-icon>
       <span class="file-name" :title="dataFile || '请求数据文件'">{{ dataFileName }}</span>
       <span class="spacer" />
       <el-button link size="small" @click="emit('reveal')">打开位置</el-button>
+    </footer>
+
+    <footer v-else class="list-footer rail-footer">
+      <el-tooltip content="打开数据文件位置" placement="right" :show-after="120">
+        <button class="rail-item" type="button" @click="emit('reveal')">
+          <el-icon :size="14"><FolderOpened /></el-icon>
+        </button>
+      </el-tooltip>
     </footer>
   </section>
 </template>
@@ -153,6 +209,11 @@ function formatTime(timestamp: number): string {
 .request-list {
   width: 258px;
   flex: none;
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.request-list.collapsed {
+  width: 54px;
 }
 
 .count {
@@ -169,11 +230,42 @@ function formatTime(timestamp: number): string {
 }
 
 .list-search {
-  width: 118px;
+  width: 100px;
 }
 
 .list-search :deep(.el-input__wrapper) {
   padding: 1px 8px;
+}
+
+.icon-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text-3);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.icon-toggle:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.rail-header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-panel-muted);
 }
 
 .list-body {
@@ -184,6 +276,64 @@ function formatTime(timestamp: number): string {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.rail-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-2);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.rail-item:hover {
+  background: var(--app-hover);
+  border-color: var(--app-border);
+}
+
+.rail-item.active {
+  background: var(--app-primary-soft);
+  border-color: rgba(47, 111, 237, 0.32);
+}
+
+.rail-method {
+  font-family: var(--app-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rail-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.rail-empty {
+  font-size: 11px;
+  color: var(--app-text-3);
+  padding: 8px 0;
 }
 
 .list-empty {
@@ -361,6 +511,11 @@ function formatTime(timestamp: number): string {
   padding: 7px 12px;
   border-top: 1px solid var(--app-border);
   background: var(--app-panel-muted);
+}
+
+.rail-footer {
+  justify-content: center;
+  padding: 6px 0;
 }
 
 .footer-icon {

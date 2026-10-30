@@ -3,7 +3,13 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Moon, Sunny } from '@element-plus/icons-vue'
 import type { AppInfo, ThemeMode } from '@shared/types'
-import { setDownloadDir, setSidebarCollapsed, setTheme, useSettings } from '../stores/settings'
+import {
+  setApiAutoSave,
+  setDownloadDir,
+  setSidebarCollapsed,
+  setTheme,
+  useSettings
+} from '../stores/settings'
 
 const { settings } = useSettings()
 const info = ref<AppInfo | null>(null)
@@ -33,6 +39,10 @@ function applyTheme(theme: ThemeMode): void {
 
 function toggleCollapsed(value: boolean): void {
   void setSidebarCollapsed(value)
+}
+
+function toggleApiAutoSave(value: boolean): void {
+  void setApiAutoSave(value)
 }
 
 onMounted(async () => {
@@ -85,6 +95,23 @@ onMounted(async () => {
       </section>
 
       <section class="card">
+        <div class="card-title">API 请求</div>
+        <div class="card-desc muted small">
+          控制 API 请求页面修改请求后是否自动写入本地数据文件。
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="row-title">自动保存</div>
+            <div class="row-desc muted small">
+              开启后停止输入约 0.6 秒即自动保存，切换请求或窗口失焦时也会立即保存；关闭后只有点击「保存」或按
+              Ctrl+S 才会写入数据文件（切换请求时会先询问是否保存）。
+            </div>
+          </div>
+          <el-switch :model-value="settings.apiAutoSave" @update:model-value="toggleApiAutoSave(Boolean($event))" />
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-title">文件下载</div>
         <div class="card-desc muted small">
           API 响应、导出的格式化 JSON 等文件默认保存到该目录。
@@ -101,7 +128,7 @@ onMounted(async () => {
         <div class="about-grid">
           <div class="about-item">
             <span class="about-label">应用版本</span>
-            <span class="about-value mono">v{{ info?.version ?? '1.1.1' }}</span>
+            <span class="about-value mono">v{{ info?.version ?? '1.1.3' }}</span>
           </div>
           <div class="about-item">
             <span class="about-label">Electron</span>
@@ -161,7 +188,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 920px;
+  /* 不再限制最大宽度：窗口变宽时卡片跟着铺满，右侧不留空 */
+  width: 100%;
 }
 
 .card {
@@ -190,7 +218,7 @@ onMounted(async () => {
 
 .theme-card {
   flex: 1;
-  max-width: 260px;
+  min-width: 0;
   padding: 10px;
   border: 1.5px solid var(--app-border);
   border-radius: 10px;
@@ -211,7 +239,7 @@ onMounted(async () => {
 }
 
 .theme-preview {
-  height: 76px;
+  height: 100px;
   border-radius: 7px;
   padding: 10px;
   display: flex;
@@ -300,7 +328,7 @@ onMounted(async () => {
 
 .about-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 10px 24px;
   margin: 12px 0;
 }

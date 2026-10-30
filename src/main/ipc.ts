@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import { promises as fsp } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type {
   AppInfo,
   AppSettings,
@@ -142,6 +142,23 @@ export function registerIpcHandlers(): void {
         const target = assertAbsolutePath(filePath, '文件路径')
         await fsp.writeFile(target, content ?? '', 'utf8')
         return { ok: true, filePath: target, bytes: Buffer.byteLength(content ?? '', 'utf8') }
+      } catch (error) {
+        return { ok: false, error: (error as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'file:write-binary',
+    async (_event, filePath: string, base64: string): Promise<WriteTextResult> => {
+      try {
+        const target = assertAbsolutePath(filePath, '文件路径')
+        if (typeof base64 !== 'string' || !base64) throw new Error('二进制内容为空')
+        const buffer = Buffer.from(base64, 'base64')
+        if (!buffer.length) throw new Error('二进制内容解析失败')
+        await fsp.mkdir(dirname(target), { recursive: true }).catch(() => undefined)
+        await fsp.writeFile(target, buffer)
+        return { ok: true, filePath: target, bytes: buffer.length }
       } catch (error) {
         return { ok: false, error: (error as Error).message }
       }

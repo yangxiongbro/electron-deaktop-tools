@@ -1,11 +1,14 @@
 import { reactive, ref } from 'vue'
-import type { AppSettings, ThemeMode } from '@shared/types'
+import { DEFAULT_CONTENT_TYPES, type AppSettings, type ThemeMode } from '@shared/types'
 
 const state = reactive<AppSettings>({
   theme: 'light',
   downloadDir: '',
   sidebarCollapsed: false,
-  lastToolId: 'json'
+  lastToolId: 'json',
+  apiAutoSave: false,
+  apiContentTypes: [...DEFAULT_CONTENT_TYPES],
+  apiSidebarCollapsed: false
 })
 
 const ready = ref(false)
@@ -48,6 +51,21 @@ export async function setDownloadDir(downloadDir: string): Promise<void> {
 
 export async function setLastTool(lastToolId: string): Promise<void> {
   await patch({ lastToolId })
+}
+
+/** API 请求：自动保存开关（默认关闭） */
+export async function setApiAutoSave(enabled: boolean): Promise<void> {
+  await patch({ apiAutoSave: enabled })
+}
+
+/** API 请求：请求列表折叠状态 */
+export async function setApiSidebarCollapsed(collapsed: boolean): Promise<void> {
+  await patch({ apiSidebarCollapsed: collapsed })
+}
+
+/** API 请求：Content-Type 候选项增删 */
+export async function setApiContentTypes(list: string[]): Promise<void> {
+  await patch({ apiContentTypes: list })
 }
 
 export function useSettings(): { settings: AppSettings; ready: typeof ready } {

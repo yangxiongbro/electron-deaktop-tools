@@ -30,6 +30,21 @@ function plainRow(row: KeyValueRow): KeyValueRow {
   return { id: row.id, enabled: row.enabled, key: row.key, value: row.value }
 }
 
+/**
+ * 去掉地址里的查询串。
+ *
+ * 界面上的「参数」表格与地址栏的 `?a=1&b=2` 是双向同步的，发送时参数由主进程统一
+ * 追加到 URL 上；这里必须先去掉地址自带的查询串，否则同一批参数会被发送两次。
+ */
+export function baseUrlOf(rawUrl: string): string {
+  const url = rawUrl.trim()
+  const queryIndex = url.indexOf('?')
+  if (queryIndex === -1) return url
+  const hashIndex = url.indexOf('#')
+  if (hashIndex !== -1 && hashIndex < queryIndex) return url
+  return url.slice(0, queryIndex)
+}
+
 function plainFormRow(row: FormRow): FormRow {
   return {
     id: row.id,
@@ -54,11 +69,14 @@ export function buildHttpRequestConfig(
   outputPath: string,
   maxDisplayBytes: number
 ): HttpRequestConfig {
+  const params = state.params.map(plainRow)
+  // 参数表已经镜像了地址里的查询串，两者同时存在时以参数表为准（否则会重复发送）
+  const hasParams = params.some((row) => row.enabled && row.key.trim() !== '')
   return {
     requestId,
     method: state.method,
-    url: state.url.trim(),
-    params: state.params.map(plainRow),
+    url: hasParams ? baseUrlOf(state.url) : state.url.trim(),
+    params,
     headers: state.headers.map(plainRow),
     auth: {
       type: state.auth.type,

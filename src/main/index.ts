@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, screen, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc'
@@ -6,6 +6,10 @@ import { loadSettings } from './store'
 import { setupSmokeCapture } from './smoke'
 
 const APP_ID = 'com.electron.deaktoptools'
+
+/** 默认窗口大小（也会按屏幕可用区域自动收窄，避免小屏幕上超出边界） */
+const DEFAULT_WINDOW_SIZE = { width: 1440, height: 900 }
+const MIN_WINDOW_SIZE = { width: 1040, height: 660 }
 
 let mainWindow: BrowserWindow | null = null
 
@@ -27,11 +31,16 @@ function createWindow(): BrowserWindow {
   const smoke = Boolean(process.env.DSH_SMOKE_DIR)
   const iconPath = join(__dirname, '../../build/icon.png')
 
+  // 以默认尺寸打开，但不超过当前屏幕可用区域（小屏笔记本 / 高缩放比时自动收窄）
+  const { workAreaSize } = screen.getPrimaryDisplay()
+  const width = Math.min(DEFAULT_WINDOW_SIZE.width, Math.max(MIN_WINDOW_SIZE.width, workAreaSize.width - 80))
+  const height = Math.min(DEFAULT_WINDOW_SIZE.height, Math.max(MIN_WINDOW_SIZE.height, workAreaSize.height - 80))
+
   const win = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 960,
-    minHeight: 620,
+    width,
+    height,
+    minWidth: MIN_WINDOW_SIZE.width,
+    minHeight: MIN_WINDOW_SIZE.height,
     show: smoke,
     backgroundColor: settings.theme === 'dark' ? '#141414' : '#f5f7fa',
     autoHideMenuBar: true,

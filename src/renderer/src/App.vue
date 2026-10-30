@@ -2,15 +2,17 @@
 import { computed, onMounted, ref } from 'vue'
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import AppSidebar from './components/AppSidebar.vue'
-import { TOOLS } from './tools'
+import { TOOLS, TOOL_SETTINGS_ID } from './tools'
 import { setLastTool, setSidebarCollapsed, setTheme, useSettings } from './stores/settings'
 const { settings } = useSettings()
 
 const currentId = ref('json')
-const version = ref('')
 
 const currentTool = computed(() => TOOLS.find((tool) => tool.id === currentId.value) ?? TOOLS[0])
 const isDark = computed(() => settings.theme === 'dark')
+/** 工具列表（不含设置）与设置项分开渲染：设置固定放在侧边栏底部 */
+const toolList = computed(() => TOOLS.filter((tool) => tool.id !== TOOL_SETTINGS_ID))
+const settingsTool = computed(() => TOOLS.find((tool) => tool.id === TOOL_SETTINGS_ID) ?? TOOLS[TOOLS.length - 1])
 
 function selectTool(id: string): void {
   currentId.value = id
@@ -25,15 +27,9 @@ function toggleSidebar(): void {
   void setSidebarCollapsed(!settings.sidebarCollapsed)
 }
 
-onMounted(async () => {
+onMounted(() => {
   if (TOOLS.some((tool) => tool.id === settings.lastToolId)) {
     currentId.value = settings.lastToolId
-  }
-  try {
-    const info = await window.api.app.info()
-    version.value = info.version
-  } catch {
-    version.value = '1.1.1'
   }
 
   window.__toolbox = {
@@ -51,10 +47,10 @@ onMounted(async () => {
 <template>
   <div class="app-shell">
     <AppSidebar
-      :tools="TOOLS"
+      :tools="toolList"
+      :settings-tool="settingsTool"
       :current-id="currentId"
       :collapsed="settings.sidebarCollapsed"
-      :version="version"
       @select="selectTool"
       @toggle="toggleSidebar"
     />

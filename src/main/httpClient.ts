@@ -7,6 +7,7 @@ import { once } from 'node:events'
 import type {
   HttpBodyConfig,
   HttpRequestConfig,
+  HttpRequestSnapshot,
   HttpResponseResult,
   KeyValueRow
 } from '@shared/types'
@@ -167,9 +168,82 @@ function decodeBuffer(buffer: Buffer, charset: string): string {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 二进制响应识别                                                       */
+/* ------------------------------------------------------------------ */
+
+/** 明确属于「文本」的 application 子类型 */
+const TEXTUAL_APPLICATION =
+  /^(application\/(json|ld\+json|xml|xhtml\+xml|atom\+xml|rss\+xml|javascript|ecmascript|x-javascript|graphql|x-www-form-urlencoded|yaml|x-yaml|ndjson|x-ndjson|sql|csv|toml|x-sh|typescript|x-typescript|problem\+json))(\s*;|$)/i
+
+/** 明确属于「二进制」的 application 子类型（vnd.* 涵盖 docx / xlsx / pptx 等 office 文件） */
+const BINARY_APPLICATION =
+  /^(application\/(octet-stream|pdf|zip|gzip|x-gzip|x-tar|x-7z-compressed|x-rar-compressed|wasm|vnd\.|msword|x-protobuf|protobuf|x-binary|x-cbor|msgpack|x-msgpack))/i
+
+/** 图片 / 音频 / 视频 / 字体等一律按二进制处理 */
+const BINARY_TOP_LEVEL = /^(image|audio|video|font|model)\//i
+
+/**
+ * 判断响应该按文本展示还是按二进制导出。
+ *
+ * 不带 Content-Type 时按文本处理（保持旧行为）；无法识别的 application/* 按二进制处理，
+ * 避免把压缩包、office 文档等解码成乱码展示。
+ *
+ * 注意：office 文档的 MIME（`application/vnd.openxmlformats-…spreadsheetml.sheet`）里也含有
+ * "xml" 字样，所以这里只按「精确子类型」判断，不做 `includes('xml')` 这类模糊匹配。
+ */
+export function isTextualContentType(contentType?: string): boolean {
+  const type = (contentType ?? '').split(';')[0].trim().toLowerCase()
+  if (!type) return true
+  if (type.startsWith('text/')) return true
+  // application/vnd.api+json、application/ld+json、application/atom+xml 之类
+  if (type.includes('+json') || type.includes('+xml')) return true
+  if (TEXTUAL_APPLICATION.test(type)) return true
+  if (BINARY_TOP_LEVEL.test(type)) return false
+  if (BINARY_APPLICATION.test(type)) return false
+  return false
+}
+
+/** 从 Content-Disposition 里解析建议文件名，优先使用 RFC 5987 的 filename* */
+export function parseDispositionFileName(disposition?: string): string | undefined {
+  if (!disposition) return undefined
+  const extended = /filename\*\s*=\s*([^']*)'[^']*'([^;]+)/i.exec(disposition)
+  const candidates: string[] = []
+  if (extended) {
+    try {
+      candidates.push(decodeURIComponent(extended[2].trim().replace(/^"|"$/g, '')))
+    } catch {
+      candidates.push(extended[2].trim().replace(/^"|"$/g, ''))
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition)
+  if (plain) {
+    const raw = plain[1].trim()
+    try {
+      candidates.push(decodeURIComponent(raw))
+    } catch {
+      candidates.push(raw)
+    }
+  }
+  return candidates.find((item) => item.trim() !== '')?.trim()
+}
+
+/** 去掉路径分隔符与 Windows 非法字符，保证解析出的文件名可以直接用于保存对话框 */
+export function safeFileName(name: string, fallback: string): string {
+  const base = name.split(/[\\/]/).pop() ?? ''
+  const cleaned = base
+    .replace(/[\\/:*?"<>|]/g, '_')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f]/g, '')
+    .trim()
+  return cleaned || fallback
+}
+
 interface ResponseCapture {
   bodyText?: string
   bodyTruncated?: boolean
+  bodyBase64?: string
+  binary?: boolean
   bodyPath?: string
   size: number
 }
@@ -180,7 +254,8 @@ async function captureResponse(
   onProgress: (loaded: number, total: number) => void
 ): Promise<ResponseCapture> {
   const total = Number(res.headers['content-length'] ?? 0)
-  const charset = guessCharset(res.headers['content-type'] as string | undefined)
+  const rawContentType = res.headers['content-type'] as string | undefined
+  const charset = guessCharset(rawContentType)
   const displayMode = config.options.responseMode !== 'file'
 
   if (displayMode) {
@@ -194,9 +269,16 @@ async function captureResponse(
       onProgress(size, total)
     }
     const collected = Buffer.concat(chunks, Math.min(size, limit))
+    const truncated = size > limit
+
+    // 二进制响应（图片、压缩包、office 文档等）不能当文本解码，否则导出会损坏文件
+    if (!isTextualContentType(rawContentType)) {
+      return { bodyBase64: collected.toString('base64'), binary: true, bodyTruncated: truncated, size }
+    }
+
     return {
       bodyText: decodeBuffer(collected, charset),
-      bodyTruncated: size > limit,
+      bodyTruncated: truncated,
       size
     }
   }
@@ -299,8 +381,8 @@ export async function performHttpRequest(
     Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase())
 
   if (body.contentType && !hasHeader('content-type')) headers['Content-Type'] = body.contentType
-  if (!hasHeader('accept')) headers.Accept = '*/*'
-  if (!hasHeader('user-agent')) headers['User-Agent'] = 'DevToolbox/1.0 (+Electron)'
+  if (!hasHeader('accept')) headers.Accept = 'application/json, text/plain, */*'
+  if (!hasHeader('user-agent')) headers['User-Agent'] = 'DevToolbox (+Electron)'
 
   let url: URL
   try {
@@ -324,8 +406,18 @@ export async function performHttpRequest(
   let method = config.method.toUpperCase()
   let redirects = 0
 
+  // 记录实际发出的请求，界面「请求详情」直接展示这份快照（含自动补充的通用请求头）
+  const requestInfo: HttpRequestSnapshot = { method, url: url.toString(), headers: [] }
+  const refreshRequestInfo = (): void => {
+    requestInfo.method = method
+    requestInfo.url = url.toString()
+    requestInfo.headers = Object.entries(headers).map(([name, value]) => ({ name, value }))
+  }
+  refreshRequestInfo()
+
   try {
     for (;;) {
+      refreshRequestInfo()
       const { res, req } = await sendOnce(url, method, headers, body, config)
 
       const status = res.statusCode ?? 0
@@ -354,6 +446,9 @@ export async function performHttpRequest(
         responseHeaders.push({ name: res.rawHeaders[i], value: res.rawHeaders[i + 1] })
       }
 
+      const contentType = (res.headers['content-type'] as string | undefined) ?? ''
+      const disposition = res.headers['content-disposition'] as string | undefined
+
       return {
         ok: status >= 200 && status < 400,
         requestId: config.requestId,
@@ -361,13 +456,19 @@ export async function performHttpRequest(
         statusText: res.statusMessage ?? '',
         httpVersion: res.httpVersion,
         headers: responseHeaders,
-        contentType: (res.headers['content-type'] as string | undefined) ?? '',
+        contentType,
         size: captured.size,
         durationMs: Date.now() - started,
         bodyText: captured.bodyText,
         bodyTruncated: captured.bodyTruncated,
+        bodyBase64: captured.bodyBase64,
+        binary: captured.binary,
+        suggestedFileName: disposition
+          ? safeFileName(parseDispositionFileName(disposition) ?? '', suggestedFileNameFor(contentType))
+          : undefined,
         bodyPath: captured.bodyPath,
-        finalUrl: url.toString()
+        finalUrl: url.toString(),
+        requestInfo: { ...requestInfo, headers: [...requestInfo.headers] }
       }
     }
   } catch (error) {
@@ -384,9 +485,31 @@ export async function performHttpRequest(
       requestId: config.requestId,
       size: 0,
       durationMs: Date.now() - started,
-      error: message
+      error: message,
+      finalUrl: url.toString(),
+      requestInfo: { ...requestInfo, headers: [...requestInfo.headers] }
     }
   }
+}
+
+/** 根据响应 Content-Type 给出一个带正确扩展名的默认文件名 */
+export function suggestedFileNameFor(contentType: string): string {
+  const type = (contentType ?? '').split(';')[0].trim().toLowerCase()
+  if (type.includes('json')) return 'response.json'
+  if (type.includes('html')) return 'response.html'
+  if (type.includes('xml')) return 'response.xml'
+  if (type.includes('spreadsheet') || type.includes('ms-excel')) return 'response.xlsx'
+  if (type.includes('word')) return 'response.docx'
+  if (type.includes('presentation') || type.includes('powerpoint')) return 'response.pptx'
+  if (type === 'application/pdf') return 'response.pdf'
+  if (type.includes('zip')) return 'response.zip'
+  if (type.includes('gzip')) return 'response.gz'
+  if (type.startsWith('text/')) return 'response.txt'
+  if (type.startsWith('image/')) {
+    const ext = type.split('/')[1]?.replace(/[^a-z0-9]/g, '') || 'png'
+    return `response.${ext === 'jpeg' ? 'jpg' : ext}`
+  }
+  return 'response.bin'
 }
 
 export function defaultFileNameFromUrl(rawUrl: string, contentType: string): string {
@@ -397,9 +520,5 @@ export function defaultFileNameFromUrl(rawUrl: string, contentType: string): str
   } catch {
     // 忽略解析失败，退化为默认文件名
   }
-  if (contentType.includes('json')) return 'response.json'
-  if (contentType.includes('html')) return 'response.html'
-  if (contentType.includes('xml')) return 'response.xml'
-  if (contentType.startsWith('text/')) return 'response.txt'
-  return 'response.bin'
+  return suggestedFileNameFor(contentType)
 }

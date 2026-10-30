@@ -52,8 +52,15 @@ export function setupSmokeCapture(win: BrowserWindow): void {
       const url = fill('.url-input input', 'https://httpbin.org/get')
       return named && url
     })()`)
-    // 等待自动保存落盘、提示消失，截图里就是「已保存」状态
-    await wait(3400)
+    // 自动保存默认关闭，这里点一下「保存」把示例请求落盘，截图里就是「已保存」状态
+    await runScript(`(() => {
+      const save = Array.from(document.querySelectorAll('.project-bar button')).find(
+        (item) => (item.textContent || '').replace(/\\s+/g, '') === '保存'
+      )
+      if (save) save.click()
+      return Boolean(save)
+    })()`)
+    await wait(3800)
   }
 
   win.webContents.once('did-finish-load', () => {

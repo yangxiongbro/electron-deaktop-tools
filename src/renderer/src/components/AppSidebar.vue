@@ -4,9 +4,10 @@ import type { ToolMeta } from '../tools'
 
 defineProps<{
   tools: ToolMeta[]
+  /** 设置项单独放在底部，不跟工具列表混在一起 */
+  settingsTool: ToolMeta
   currentId: string
   collapsed: boolean
-  version?: string
 }>()
 
 const emit = defineEmits<{
@@ -57,11 +58,28 @@ const emit = defineEmits<{
     </nav>
 
     <div class="nav-footer">
+      <el-tooltip
+        :content="settingsTool.name"
+        placement="right"
+        :disabled="!collapsed"
+        :show-after="120"
+      >
+        <button
+          class="nav-item settings-btn"
+          :class="{ active: currentId === settingsTool.id }"
+          :title="collapsed ? settingsTool.name : undefined"
+          @click="emit('select', settingsTool.id)"
+        >
+          <el-icon class="nav-icon" :size="17">
+            <component :is="settingsTool.icon" />
+          </el-icon>
+          <span v-if="!collapsed" class="nav-label">{{ settingsTool.name }}</span>
+        </button>
+      </el-tooltip>
       <div v-if="!collapsed" class="footer-hint">
         <span class="dot" />
         <span>本地运行 · 数据不出设备</span>
       </div>
-      <div v-if="!collapsed && version" class="footer-version">v{{ version }}</div>
     </div>
   </aside>
 </template>
@@ -221,6 +239,19 @@ const emit = defineEmits<{
   gap: 6px;
 }
 
+.sidebar.collapsed .nav-footer {
+  padding: 8px;
+}
+
+.settings-btn {
+  height: 38px;
+  margin-bottom: 2px;
+}
+
+.sidebar.collapsed .settings-btn {
+  height: 40px;
+}
+
 .footer-hint {
   display: flex;
   align-items: center;
@@ -236,11 +267,5 @@ const emit = defineEmits<{
   border-radius: 50%;
   background: #22c55e;
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
-}
-
-.footer-version {
-  font-size: 11px;
-  color: var(--app-text-3);
-  opacity: 0.8;
 }
 </style>

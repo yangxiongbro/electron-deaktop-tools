@@ -36,7 +36,9 @@ const api: DesktopApi = {
   },
   file: {
     readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),
-    writeText: (filePath: string, content: string) => ipcRenderer.invoke('file:write-text', filePath, content)
+    writeText: (filePath: string, content: string) => ipcRenderer.invoke('file:write-text', filePath, content),
+    writeBinary: (filePath: string, base64: string) =>
+      ipcRenderer.invoke('file:write-binary', filePath, base64)
   },
   json: {
     formatFile: (request: JsonFileRequest) =>

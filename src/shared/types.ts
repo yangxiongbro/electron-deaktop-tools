@@ -5,6 +5,24 @@
 
 export type ThemeMode = 'light' | 'dark'
 
+/** API 请求体 Content-Type 的内置候选项，用户可以在界面上增删 */
+export const DEFAULT_CONTENT_TYPES: string[] = [
+  'application/json',
+  'application/json;charset=UTF-8',
+  'application/x-www-form-urlencoded',
+  'multipart/form-data',
+  'text/plain',
+  'text/plain;charset=UTF-8',
+  'text/html',
+  'text/csv',
+  'text/xml',
+  'application/xml',
+  'application/javascript',
+  'application/octet-stream',
+  'application/x-ndjson',
+  'application/grpc'
+]
+
 export interface AppSettings {
   /** 界面主题 */
   theme: ThemeMode
@@ -14,12 +32,21 @@ export interface AppSettings {
   sidebarCollapsed: boolean
   /** 最近打开的工具 id，用于下次启动恢复 */
   lastToolId: string
+  /** API 请求：是否在停止输入后自动保存（默认关闭，关闭后需手动保存） */
+  apiAutoSave: boolean
+  /** API 请求：请求体 Content-Type 的候选项（可增删） */
+  apiContentTypes: string[]
+  /** API 请求：左侧请求列表是否折叠 */
+  apiSidebarCollapsed: boolean
 }
 
 export const DEFAULT_SETTINGS: Omit<AppSettings, 'downloadDir'> = {
   theme: 'light',
   sidebarCollapsed: false,
-  lastToolId: 'json'
+  lastToolId: 'json',
+  apiAutoSave: false,
+  apiContentTypes: [...DEFAULT_CONTENT_TYPES],
+  apiSidebarCollapsed: false
 }
 
 export interface FileDialogFilter {
@@ -171,6 +198,13 @@ export interface HttpRequestConfig {
   options: HttpOptions
 }
 
+/** 实际发出的请求快照，用于「请求详情」展示 */
+export interface HttpRequestSnapshot {
+  method: string
+  url: string
+  headers: { name: string; value: string }[]
+}
+
 export interface HttpResponseResult {
   ok: boolean
   requestId: string
@@ -185,9 +219,20 @@ export interface HttpResponseResult {
   /** 展示模式下的响应文本（可能被截断） */
   bodyText?: string
   bodyTruncated?: boolean
+  /**
+   * 展示模式下遇到二进制响应（图片、压缩包、office 等）时，
+   * 按 base64 返回原始字节，界面可原样导出为文件。
+   */
+  bodyBase64?: string
+  /** 响应是否为二进制内容（此时 bodyText 为空、bodyBase64 有值） */
+  binary?: boolean
+  /** 从 Content-Disposition 解析出的建议文件名 */
+  suggestedFileName?: string
   /** 保存模式下的文件路径 */
   bodyPath?: string
   finalUrl?: string
+  /** 实际发出的请求（方法 / 地址 / 请求头），包含自动补充的通用请求头 */
+  requestInfo?: HttpRequestSnapshot
   error?: string
 }
 
@@ -318,6 +363,8 @@ export interface DesktopApi {
   file: {
     readText(filePath: string): Promise<ReadTextResult>
     writeText(filePath: string, content: string): Promise<WriteTextResult>
+    /** 把 base64 内容按原始字节写入文件，用于导出二进制响应 */
+    writeBinary(filePath: string, base64: string): Promise<WriteTextResult>
   }
   json: {
     formatFile(request: JsonFileRequest): Promise<JsonFileResult>
