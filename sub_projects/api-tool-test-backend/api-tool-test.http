@@ -1,0 +1,80 @@
+@host = http://localhost:8080
+
+### GET + 查询参数
+GET {{host}}/api/test/get?name=张三&tag=api&tag=test
+X-Demo: http-client
+
+### POST JSON
+POST {{host}}/api/test/post?source=http-file
+Content-Type: application/json
+
+{
+  "name": "张三",
+  "age": 18,
+  "tags": ["api", "test"],
+  "profile": {
+    "city": "上海",
+    "active": true
+  }
+}
+
+### POST x-www-form-urlencoded
+POST {{host}}/api/test/post
+Content-Type: application/x-www-form-urlencoded
+
+name=张三&age=18
+
+### POST multipart/form-data
+POST {{host}}/api/test/post
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="name"
+
+张三
+--WebAppBoundary
+Content-Disposition: form-data; name="message"
+
+hello form-data
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="hello.txt"
+Content-Type: text/plain
+
+hello from http file
+--WebAppBoundary--
+
+### PUT + 路径参数 + JSON
+PUT {{host}}/api/test/put/1001?operator=tester
+Content-Type: application/json
+
+{
+  "name": "updated",
+  "enabled": true
+}
+
+### DELETE
+DELETE {{host}}/api/test/delete/1001?reason=cleanup
+
+### PATCH 通用 Echo
+PATCH {{host}}/api/echo/demo?mode=echo
+Content-Type: text/plain
+
+hello echo
+
+### 指定 HTTP 状态码
+GET {{host}}/api/test/status/418
+
+### 文件导出 - 文本
+GET {{host}}/api/test/export?format=text&filename=export.txt
+
+### 文件导出 - JSON
+GET {{host}}/api/test/export?format=json&filename=report.json
+
+### 文件导出 - CSV（UTF-8 BOM）
+GET {{host}}/api/test/export?format=csv&filename=report.csv
+
+### 文件导出 - 二进制 1 MiB
+GET {{host}}/api/test/export?format=binary&size=1048576&filename=demo.bin
+
+### 文件导出 - 中文文件名
+GET {{host}}/api/test/export?format=text&filename=导出测试.txt

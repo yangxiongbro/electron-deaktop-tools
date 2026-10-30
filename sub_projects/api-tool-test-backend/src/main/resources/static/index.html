@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Tool Test Console</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0b1020;
+            --bg-soft: #111936;
+            --panel: #151f3d;
+            --panel-2: #1b2749;
+            --line: #2a3760;
+            --text: #e9eefc;
+            --muted: #9aa8cc;
+            --accent: #6ea8fe;
+            --accent-2: #8b5cf6;
+            --ok: #34d399;
+            --warn: #fbbf24;
+            --err: #fb7185;
+            --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+        }
+
+        * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(900px 500px at 12% -8%, rgba(110, 168, 254, .18), transparent 60%),
+                radial-gradient(700px 420px at 92% 4%, rgba(139, 92, 246, .16), transparent 58%),
+                var(--bg);
+            color: var(--text);
+            font: 14px/1.55 Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+        }
+
+        .page {
+            width: min(1280px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 30px 0 48px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            gap: 18px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(22px, 3vw, 32px);
+            letter-spacing: -.03em;
+        }
+
+        .subtitle {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .badge {
+            flex: none;
+            padding: 7px 11px;
+            border: 1px solid rgba(52, 211, 153, .35);
+            border-radius: 999px;
+            background: rgba(52, 211, 153, .08);
+            color: var(--ok);
+            font: 12px/1 var(--mono);
+            white-space: nowrap;
+        }
+
+        .presets {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0 0 14px;
+        }
+
+        .preset {
+            border: 1px solid var(--line);
+            background: rgba(21, 31, 61, .82);
+            color: var(--muted);
+            border-radius: 9px;
+            padding: 7px 11px;
+            cursor: pointer;
+            transition: .15s ease;
+            font-size: 12px;
+            text-decoration: none;
+        }
+
+        .preset:hover {
+            color: var(--text);
+            border-color: var(--accent);
+            background: rgba(110, 168, 254, .1);
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
+            gap: 16px;
+            align-items: start;
+        }
+
+        .card {
+            min-width: 0;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: linear-gradient(180deg, rgba(27, 39, 73, .78), rgba(17, 25, 54, .92));
+            box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+            overflow: hidden;
+        }
+
+        .card-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 18px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .card-head h2 {
+            margin: 0;
+            font-size: 14px;
+            font-weight: 650;
+            letter-spacing: .01em;
+        }
+
+        .card-head .hint {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .request-line {
+            display: grid;
+            grid-template-columns: 118px minmax(0, 1fr) 94px;
+            gap: 8px;
+            padding: 16px 18px;
+        }
+
+        select, input, textarea {
+            width: 100%;
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            background: #0e1630;
+            color: var(--text);
+            padding: 10px 11px;
+            outline: none;
+            font: inherit;
+            transition: border-color .15s ease, box-shadow .15s ease;
+        }
+
+        select:focus, input:focus, textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(110, 168, 254, .12);
+        }
+
+        #method {
+            font: 600 13px var(--mono);
+            color: var(--accent);
+        }
+
+        #path {
+            font-family: var(--mono);
+            font-size: 13px;
+        }
+
+        .send {
+            border: 0;
+            border-radius: 9px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: #081020;
+            font-weight: 750;
+            cursor: pointer;
+            transition: filter .15s ease, transform .15s ease;
+        }
+
+        .send:hover { filter: brightness(1.1); }
+        .send:active { transform: translateY(1px); }
+        .send:disabled { opacity: .55; cursor: wait; }
+
+        .tabs {
+            display: flex;
+            gap: 4px;
+            padding: 0 18px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .tab {
+            position: relative;
+            border: 0;
+            background: transparent;
+            color: var(--muted);
+            padding: 11px 2px 12px;
+            margin-right: 18px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .tab.active { color: var(--text); }
+        .tab.active::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -1px;
+            height: 2px;
+            border-radius: 2px;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        }
+
+        .pane {
+            display: none;
+            padding: 16px 18px 20px;
+        }
+
+        .pane.active { display: block; }
+
+        .pane-note {
+            margin: 0 0 12px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .kv-list {
+            display: grid;
+            gap: 8px;
+        }
+
+        .kv-row {
+            display: grid;
+            grid-template-columns: minmax(110px, .42fr) minmax(0, 1fr) 34px;
+            gap: 7px;
+        }
+
+        .kv-row input {
+            padding: 8px 10px;
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .remove-row {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 17px;
+            line-height: 1;
+        }
+
+        .remove-row:hover {
+            border-color: var(--err);
+            color: var(--err);
+        }
+
+        .add-row {
+            margin-top: 10px;
+            border: 1px dashed var(--line);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            padding: 8px 11px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .add-row:hover { color: var(--accent); border-color: var(--accent); }
+
+        .body-controls {
+            display: grid;
+            grid-template-columns: 190px minmax(0, 1fr);
+            gap: 12px;
+            align-items: start;
+            margin-bottom: 12px;
+        }
+
+        .field-label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+        }
+
+        textarea {
+            min-height: 190px;
+            resize: vertical;
+            font: 12px/1.6 var(--mono);
+        }
+
+        .file-input {
+            margin-top: 12px;
+            padding: 9px;
+            border: 1px dashed var(--line);
+            border-radius: 9px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .response-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--line);
+            font: 12px var(--mono);
+            color: var(--muted);
+        }
+
+        .pill {
+            padding: 5px 8px;
+            border-radius: 6px;
+            background: var(--panel-2);
+            border: 1px solid var(--line);
+        }
+
+        .pill.ok { color: var(--ok); border-color: rgba(52, 211, 153, .35); }
+        .pill.err { color: var(--err); border-color: rgba(251, 113, 133, .35); }
+
+        #responseBody {
+            margin: 0;
+            min-height: 390px;
+            max-height: 62vh;
+            overflow: auto;
+            padding: 18px;
+            font: 12px/1.65 var(--mono);
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: #dbe6ff;
+        }
+
+        .response-foot {
+            border-top: 1px solid var(--line);
+            padding: 12px 18px 16px;
+        }
+
+        details summary {
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 12px;
+            user-select: none;
+        }
+
+        #responseHeaders {
+            margin: 10px 0 0;
+            color: var(--muted);
+            font: 11px/1.55 var(--mono);
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .placeholder { color: #5f6f96; }
+
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: 1fr; }
+            #responseBody { min-height: 220px; }
+        }
+
+        @media (max-width: 560px) {
+            .page { width: min(100% - 20px, 1280px); padding-top: 18px; }
+            header { align-items: flex-start; flex-direction: column; }
+            .request-line { grid-template-columns: 100px minmax(0, 1fr); }
+            .send { grid-column: 1 / -1; padding: 11px; }
+            .body-controls { grid-template-columns: 1fr; }
+            .kv-row { grid-template-columns: minmax(82px, .42fr) minmax(0, 1fr) 32px; }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <header>
+        <div>
+            <h1>API Tool Test Console</h1>
+            <p class="subtitle">给 API 调试工具用的回显服务 · GET / POST / PUT / DELETE / PATCH · JSON / Form / Multipart</p>
+        </div>
+        <div class="badge">Spring Boot · :8080</div>
+    </header>
+
+    <div class="presets" aria-label="请求预设">
+        <button class="preset" type="button" data-preset="get">GET 查询参数</button>
+        <button class="preset" type="button" data-preset="post">POST JSON</button>
+        <button class="preset" type="button" data-preset="put">PUT 路径参数</button>
+        <button class="preset" type="button" data-preset="delete">DELETE</button>
+        <button class="preset" type="button" data-preset="form">POST Form-Data</button>
+        <button class="preset" type="button" data-preset="echo">通用 Echo</button>
+        <a class="preset"
+           href="/api/test/export?format=text&filename=console-export.txt"
+           download="console-export.txt"
+           title="测试浏览器附件下载和 Content-Disposition">下载示例文件</a>
+    </div>
+
+    <main class="layout">
+        <section class="card">
+            <div class="card-head">
+                <h2>Request</h2>
+                <span class="hint">请求内容会打印到服务端控制台</span>
+            </div>
+
+            <div class="request-line">
+                <select id="method" aria-label="HTTP 方法">
+                    <option>GET</option>
+                    <option>POST</option>
+                    <option>PUT</option>
+                    <option>DELETE</option>
+                    <option>PATCH</option>
+                </select>
+                <input id="path" value="/api/test/get" spellcheck="false" aria-label="请求 URL 或路径">
+                <button class="send" id="send" type="button">发送</button>
+            </div>
+
+            <div class="tabs" role="tablist">
+                <button class="tab active" type="button" data-target="pane-params">Query 参数</button>
+                <button class="tab" type="button" data-target="pane-headers">Headers</button>
+                <button class="tab" type="button" data-target="pane-body">Body</button>
+            </div>
+
+            <div class="pane active" id="pane-params">
+                <p class="pane-note">URL 查询参数，会自动编码后拼到请求地址上。</p>
+                <div class="kv-list" id="queryRows"></div>
+                <button class="add-row" type="button" data-add="queryRows">+ 添加查询参数</button>
+            </div>
+
+            <div class="pane" id="pane-headers">
+                <p class="pane-note">自定义请求头。JSON / 文本的 Content-Type 会自动补全，也可以手动覆盖。</p>
+                <div class="kv-list" id="headerRows"></div>
+                <button class="add-row" type="button" data-add="headerRows">+ 添加请求头</button>
+            </div>
+
+            <div class="pane" id="pane-body">
+                <div class="body-controls">
+                    <div>
+                        <label class="field-label" for="bodyType">Body 类型</label>
+                        <select id="bodyType">
+                            <option value="none">none</option>
+                            <option value="json">application/json</option>
+                            <option value="text">text/plain</option>
+                            <option value="urlencoded">x-www-form-urlencoded</option>
+                            <option value="form-data">multipart/form-data</option>
+                        </select>
+                    </div>
+                    <div id="textBodyWrap" hidden>
+                        <label class="field-label" for="textBody">请求体</label>
+                        <textarea id="textBody" spellcheck="false"></textarea>
+                    </div>
+                </div>
+
+                <div id="formBodyWrap" hidden>
+                    <p class="pane-note">表单字段：</p>
+                    <div class="kv-list" id="formRows"></div>
+                    <button class="add-row" type="button" data-add="formRows">+ 添加表单字段</button>
+                    <div class="file-input" id="fileWrap" hidden>
+                        <label class="field-label" for="files">文件字段（可多选，字段名固定为 file）</label>
+                        <input id="files" type="file" multiple>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-head">
+                <h2>Response</h2>
+                <span class="hint" id="requestUrl">等待发送</span>
+            </div>
+            <div class="response-meta">
+                <span class="pill" id="status">未发送</span>
+                <span class="pill" id="elapsed">-- ms</span>
+                <span class="pill" id="size">-- B</span>
+            </div>
+            <pre id="responseBody" class="placeholder">点击“发送”后，这里会显示服务端返回的 JSON。</pre>
+            <div class="response-foot">
+                <details>
+                    <summary>响应头 / 复制结果</summary>
+                    <pre id="responseHeaders">暂无</pre>
+                    <button class="add-row" id="copyResponse" type="button">复制响应体</button>
+                </details>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    const API_BASE = /^https?:$/.test(location.protocol) ? location.origin : "http://localhost:8080";
+    const $ = (id) => document.getElementById(id);
+
+    const methodEl = $("method");
+    const pathEl = $("path");
+    const sendEl = $("send");
+    const bodyTypeEl = $("bodyType");
+    const textBodyWrap = $("textBodyWrap");
+    const textBodyEl = $("textBody");
+    const formBodyWrap = $("formBodyWrap");
+    const fileWrap = $("fileWrap");
+    const filesEl = $("files");
+    const queryRows = $("queryRows");
+    const headerRows = $("headerRows");
+    const formRows = $("formRows");
+    const responseBody = $("responseBody");
+    const responseHeaders = $("responseHeaders");
+    const statusEl = $("status");
+    const elapsedEl = $("elapsed");
+    const sizeEl = $("size");
+    const requestUrlEl = $("requestUrl");
+    const copyResponseEl = $("copyResponse");
+
+    const jsonSample = `{
+  "name": "张三",
+  "age": 18,
+  "tags": ["api", "spring-boot"],
+  "profile": {
+    "city": "上海",
+    "active": true
+  }
+}`;
+
+    function createKvRow(container, key = "", value = "", keyPlaceholder = "key", valuePlaceholder = "value") {
+        const row = document.createElement("div");
+        row.className = "kv-row";
+
+        const keyInput = document.createElement("input");
+        keyInput.className = "kv-key";
+        keyInput.placeholder = keyPlaceholder;
+        keyInput.value = key;
+        keyInput.spellcheck = false;
+
+        const valueInput = document.createElement("input");
+        valueInput.className = "kv-value";
+        valueInput.placeholder = valuePlaceholder;
+        valueInput.value = value;
+        valueInput.spellcheck = false;
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "remove-row";
+        remove.setAttribute("aria-label", "删除");
+        remove.textContent = "×";
+        remove.addEventListener("click", () => row.remove());
+
+        row.append(keyInput, valueInput, remove);
+        container.appendChild(row);
+    }
+
+    function resetRows(container) {
+        container.replaceChildren();
+    }
+
+    function readRows(container) {
+        return [...container.querySelectorAll(".kv-row")]
+            .map((row) => [
+                row.querySelector(".kv-key").value.trim(),
+                row.querySelector(".kv-value").value
+            ])
+            .filter(([key]) => key.length > 0);
+    }
+
+    function activateTab(targetId) {
+        document.querySelectorAll(".tab").forEach((tab) => {
+            tab.classList.toggle("active", tab.dataset.target === targetId);
+        });
+        document.querySelectorAll(".pane").forEach((pane) => {
+            pane.classList.toggle("active", pane.id === targetId);
+        });
+    }
+
+    function syncBodyType() {
+        const type = bodyTypeEl.value;
+        const usesText = type === "json" || type === "text";
+        const usesForm = type === "urlencoded" || type === "form-data";
+        textBodyWrap.hidden = !usesText;
+        formBodyWrap.hidden = !usesForm;
+        fileWrap.hidden = type !== "form-data";
+    }
+
+    function setPreset(name) {
+        const presets = {
+            get: {
+                method: "GET", path: "/api/test/get", type: "none", tab: "pane-params",
+                query: [["name", "张三"], ["tag", "api"], ["tag", "spring-boot"]]
+            },
+            post: {
+                method: "POST", path: "/api/test/post", type: "json", tab: "pane-body", json: jsonSample,
+                query: [["source", "console"]]
+            },
+            put: {
+                method: "PUT", path: "/api/test/put/1001", type: "json", tab: "pane-body", json: jsonSample,
+                query: [["operator", "tester"]]
+            },
+            delete: {
+                method: "DELETE", path: "/api/test/delete/1001", type: "none", tab: "pane-params",
+                query: [["reason", "cleanup"]]
+            },
+            form: {
+                method: "POST", path: "/api/test/post", type: "form-data", tab: "pane-body",
+                query: [["source", "console"]]
+            },
+            echo: {
+                method: "PATCH", path: "/api/echo/demo", type: "text", tab: "pane-body",
+                json: "hello from generic echo endpoint", query: [["mode", "echo"]]
+            }
+        };
+
+        const preset = presets[name];
+        if (!preset) return;
+
+        methodEl.value = preset.method;
+        pathEl.value = preset.path;
+        bodyTypeEl.value = preset.type;
+        resetRows(queryRows);
+        (preset.query || []).forEach(([key, value]) => createKvRow(queryRows, key, value));
+        if (preset.json !== undefined) {
+            textBodyEl.value = preset.json;
+        }
+        syncBodyType();
+        activateTab(preset.tab);
+    }
+
+    function buildUrl() {
+        let raw = pathEl.value.trim() || "/";
+        let url;
+        if (/^https?:\/\//i.test(raw)) {
+            url = raw;
+        } else {
+            url = API_BASE + (raw.startsWith("/") ? raw : "/" + raw);
+        }
+
+        const params = new URLSearchParams();
+        readRows(queryRows).forEach(([key, value]) => params.append(key, value));
+        const query = params.toString();
+        if (query) {
+            url += (url.includes("?") ? "&" : "?") + query;
+        }
+        return url;
+    }
+
+    function buildHeaders() {
+        const headers = new Headers();
+        readRows(headerRows).forEach(([key, value]) => {
+            try {
+                headers.append(key, value);
+            } catch (error) {
+                console.warn("忽略非法请求头", key, error);
+            }
+        });
+
+        const type = bodyTypeEl.value;
+        if (type === "json" && !headers.has("Content-Type")) {
+            headers.set("Content-Type", "application/json; charset=UTF-8");
+        }
+        if (type === "text" && !headers.has("Content-Type")) {
+            headers.set("Content-Type", "text/plain; charset=UTF-8");
+        }
+        return headers;
+    }
+
+    function buildBody() {
+        const type = bodyTypeEl.value;
+        if (type === "none") return undefined;
+        if (type === "json" || type === "text") return textBodyEl.value;
+        if (type === "urlencoded") {
+            const params = new URLSearchParams();
+            readRows(formRows).forEach(([key, value]) => params.append(key, value));
+            return params;
+        }
+        if (type === "form-data") {
+            const form = new FormData();
+            readRows(formRows).forEach(([key, value]) => form.append(key, value));
+            [...filesEl.files].forEach((file) => form.append("file", file, file.name));
+            return form;
+        }
+        return undefined;
+    }
+
+    function prettyPrint(text) {
+        if (!text) return "";
+        try {
+            return JSON.stringify(JSON.parse(text), null, 2);
+        } catch (error) {
+            return text;
+        }
+    }
+
+    async function sendRequest() {
+        const method = methodEl.value;
+        const url = buildUrl();
+        const headers = buildHeaders();
+        const body = buildBody();
+
+        if ((method === "GET" || method === "HEAD") && body !== undefined) {
+            showError("浏览器 fetch 不允许 GET/HEAD 携带请求体，请改用 POST/PUT 或使用专业 API 工具测试。");
+            return;
+        }
+
+        sendEl.disabled = true;
+        sendEl.textContent = "发送中…";
+        statusEl.textContent = "请求中";
+        statusEl.className = "pill";
+        elapsedEl.textContent = "-- ms";
+        sizeEl.textContent = "-- B";
+        requestUrlEl.textContent = `${method} ${url}`;
+        responseBody.classList.remove("placeholder");
+
+        const started = performance.now();
+        try {
+            const response = await fetch(url, { method, headers, body });
+            const text = await response.text();
+            const elapsed = Math.round(performance.now() - started);
+            const bytes = new Blob([text]).size;
+
+            statusEl.textContent = `${response.status} ${response.statusText}`;
+            statusEl.className = "pill " + (response.ok ? "ok" : "err");
+            elapsedEl.textContent = `${elapsed} ms`;
+            sizeEl.textContent = `${bytes} B`;
+            responseBody.textContent = prettyPrint(text) || "(空响应体)";
+            responseHeaders.textContent = [...response.headers.entries()]
+                .map(([key, value]) => `${key}: ${value}`)
+                .join("\n") || "(无可见响应头)";
+        } catch (error) {
+            const elapsed = Math.round(performance.now() - started);
+            statusEl.textContent = "请求失败";
+            statusEl.className = "pill err";
+            elapsedEl.textContent = `${elapsed} ms`;
+            sizeEl.textContent = "-- B";
+            responseBody.textContent = String(error && error.message ? error.message : error);
+            responseHeaders.textContent = "请求未完成，请检查服务是否启动、URL 是否正确或是否被 CORS/网络策略拦截。";
+        } finally {
+            sendEl.disabled = false;
+            sendEl.textContent = "发送";
+        }
+    }
+
+    function showError(message) {
+        statusEl.textContent = "未发送";
+        statusEl.className = "pill err";
+        responseBody.classList.remove("placeholder");
+        responseBody.textContent = message;
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => activateTab(tab.dataset.target));
+    });
+
+    document.querySelectorAll("[data-add]").forEach((button) => {
+        button.addEventListener("click", () => {
+            createKvRow($(button.dataset.add), "", "");
+        });
+    });
+
+    document.querySelectorAll("[data-preset]").forEach((button) => {
+        button.addEventListener("click", () => setPreset(button.dataset.preset));
+    });
+
+    bodyTypeEl.addEventListener("change", syncBodyType);
+    sendEl.addEventListener("click", sendRequest);
+    pathEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") sendRequest();
+    });
+
+    copyResponseEl.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(responseBody.textContent || "");
+            copyResponseEl.textContent = "已复制";
+            setTimeout(() => { copyResponseEl.textContent = "复制响应体"; }, 1200);
+        } catch (error) {
+            copyResponseEl.textContent = "复制失败";
+            setTimeout(() => { copyResponseEl.textContent = "复制响应体"; }, 1200);
+        }
+    });
+
+    createKvRow(headerRows, "X-Client", "builtin-console");
+    createKvRow(formRows, "name", "张三");
+    createKvRow(formRows, "message", "hello from form-data");
+    textBodyEl.value = jsonSample;
+    setPreset("get");
+})();
+</script>
+</body>
+</html>
