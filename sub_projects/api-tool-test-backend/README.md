@@ -20,20 +20,12 @@
 ## 环境要求
 
 - JDK 17+
-- Maven 3.9+（可以直接使用项目自带的 Maven Wrapper）
+- Maven 3.9+（需在本机自行安装，仓库不包含 Maven Wrapper；能执行 `mvn -v` 即可）
 
 ## 启动
 
-Windows：
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-macOS / Linux：
-
 ```bash
-./mvnw spring-boot:run
+mvn spring-boot:run
 ```
 
 启动后：
@@ -43,15 +35,15 @@ macOS / Linux：
 
 打包运行：
 
-```powershell
-.\mvnw.cmd clean package
+```bash
+mvn clean package
 java -jar target/api-tool-test-backend-0.0.1-SNAPSHOT.jar
 ```
 
 如需修改端口：
 
-```powershell
-.\mvnw.cmd spring-boot:run -Dspring-boot.run.arguments=--server.port=9090
+```bash
+mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=9090
 ```
 
 或设置环境变量 `SERVER_PORT=9090`。
@@ -344,8 +336,8 @@ api-tool-test.http                       IDE HTTP Client 示例
 
 ## 运行测试
 
-```powershell
-.\mvnw.cmd test
+```bash
+mvn test
 ```
 
 集成测试会启动随机端口，覆盖 GET 查询参数、POST JSON、multipart 文件、PUT 路径参数、DELETE、PATCH Echo、指定状态码，以及 text/json/csv/binary 四种文件导出和非法格式校验。
