@@ -27,7 +27,9 @@ jobs:
         run: npm ci
 
       - name: Build Linux packages
-        run: npm run build:linux
+        # electron-builder 在 CI 环境下会默认尝试查询 / 发布 GitHub Release，
+        # 缺少 GH_TOKEN 时会在打包完成后报错。这里只上传 Actions artifact，显式禁用发布。
+        run: npm run build:linux -- --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
