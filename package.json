@@ -1,6 +1,6 @@
 {
   "name": "electron-deaktop-tools",
-  "version": "1.0.1",
+  "version": "1.1.1",
   "description": "跨平台桌面工具箱：JSON 格式化、命名规范转换、编码解码、API 请求、Markdown 编辑器",
   "main": "./out/main/index.js",
   "author": "electron-deaktop-tools",

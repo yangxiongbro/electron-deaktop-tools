@@ -1,7 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
-  ApiHistoryDraft,
-  ApiHistoryEntry,
+  ApiAttemptResult,
+  ApiExportResult,
+  ApiImportResult,
+  ApiProject,
+  ApiProjectsState,
+  ApiRequestDraft,
+  ApiRequestSaveResult,
   AppSettings,
   DesktopApi,
   HttpProgress,
@@ -53,11 +58,21 @@ const api: DesktopApi = {
       return () => ipcRenderer.removeListener('http:progress', handler)
     }
   },
-  history: {
-    list: () => ipcRenderer.invoke('history:list') as Promise<ApiHistoryEntry[]>,
-    add: (entry: ApiHistoryDraft) => ipcRenderer.invoke('history:add', entry) as Promise<ApiHistoryEntry[]>,
-    remove: (id: string) => ipcRenderer.invoke('history:remove', id) as Promise<ApiHistoryEntry[]>,
-    clear: () => ipcRenderer.invoke('history:clear') as Promise<ApiHistoryEntry[]>
+  projects: {
+    load: () => ipcRenderer.invoke('projects:load') as Promise<ApiProjectsState>,
+    create: (name: string) => ipcRenderer.invoke('projects:create', name) as Promise<ApiProject[]>,
+    rename: (id: string, name: string) =>
+      ipcRenderer.invoke('projects:rename', id, name) as Promise<ApiProject[]>,
+    remove: (id: string) => ipcRenderer.invoke('projects:remove', id) as Promise<ApiProject[]>,
+    saveRequest: (projectId: string, draft: ApiRequestDraft) =>
+      ipcRenderer.invoke('projects:save-request', projectId, draft) as Promise<ApiRequestSaveResult>,
+    removeRequest: (projectId: string, requestId: string) =>
+      ipcRenderer.invoke('projects:remove-request', projectId, requestId) as Promise<ApiProject[]>,
+    recordResult: (projectId: string, requestId: string, result: ApiAttemptResult) =>
+      ipcRenderer.invoke('projects:record-result', projectId, requestId, result) as Promise<ApiProject[]>,
+    exportAll: () => ipcRenderer.invoke('projects:export') as Promise<ApiExportResult>,
+    importFile: () => ipcRenderer.invoke('projects:import') as Promise<ApiImportResult>,
+    reveal: () => ipcRenderer.invoke('projects:reveal') as Promise<void>
   },
   app: {
     info: () => ipcRenderer.invoke('app:info'),

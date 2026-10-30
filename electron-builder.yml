@@ -40,6 +40,8 @@ linux:
   icon: build/icons
   category: Development
   executableName: devtoolbox
+  # deb 包必须有维护者信息（作者未配置 email 时 electron-builder 会直接报错）
+  maintainer: yangxiongbro <yangxiongbro@users.noreply.github.com>
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
   target:
     - AppImage

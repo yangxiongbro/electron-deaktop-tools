@@ -101,7 +101,7 @@ onMounted(async () => {
         <div class="about-grid">
           <div class="about-item">
             <span class="about-label">应用版本</span>
-            <span class="about-value mono">v{{ info?.version ?? '1.0.1' }}</span>
+            <span class="about-value mono">v{{ info?.version ?? '1.1.1' }}</span>
           </div>
           <div class="about-item">
             <span class="about-label">Electron</span>
@@ -123,6 +123,10 @@ onMounted(async () => {
             <span class="about-label">默认下载目录</span>
             <span class="about-value mono wrap">{{ info?.defaultDownloadDir ?? '-' }}</span>
           </div>
+          <div class="about-item">
+            <span class="about-label">请求数据文件</span>
+            <span class="about-value mono wrap">{{ info?.apiDataFile ?? '-' }}</span>
+          </div>
         </div>
 
         <div class="dir-row">
@@ -131,8 +135,9 @@ onMounted(async () => {
         </div>
 
         <div class="about-note muted small">
-          配置文件（settings.json）与请求历史（api-history.json）默认保存在<strong>安装目录</strong>；若安装目录不可写（如安装到
-          Program Files），会自动改用用户数据目录。
+          配置文件（settings.json）与 API 请求数据（api-projects.json）默认保存在<strong>安装目录</strong>；若安装目录不可写（如安装到
+          Program Files），会自动改用用户数据目录。API 请求的项目与请求记录都保存在 api-projects.json
+          中，把这个文件复制到另一台机器的同目录即可迁移，也可以在「API 请求 → 项目管理」里导入 / 导出。
         </div>
 
         <div class="about-note muted small">

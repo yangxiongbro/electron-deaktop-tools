@@ -1,25 +1,32 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Clock,
+  ArrowDown,
+  Check,
   CopyDocument,
+  Delete,
+  DocumentAdd,
   Download,
+  EditPen,
   FolderOpened,
+  Plus,
   Promotion,
   Refresh,
+  Upload,
   VideoPause
 } from '@element-plus/icons-vue'
 import type {
-  ApiHistoryEntry,
+  ApiAttemptResult,
+  ApiProject,
+  ApiRequestDraft,
+  ApiRequestRecord,
   AuthType,
   BodyType,
   FormRow,
   HttpAuthConfig,
   HttpBodyConfig,
   HttpMethod,
-  HttpOptions,
-  HttpRequestConfig,
   HttpResponseResult,
   KeyValueRow,
   ResponseMode
@@ -27,24 +34,35 @@ import type {
 import KeyValueEditor from '../components/KeyValueEditor.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
 import JsonTree from '../components/JsonTree.vue'
-import ApiHistoryDrawer from '../components/ApiHistoryDrawer.vue'
+import ApiRequestList from '../components/ApiRequestList.vue'
 import { copyText } from '../utils/clipboard'
 import { formatBytes, formatDuration, randomId } from '../utils/format'
 import { buildHttpRequestConfig } from '../utils/http'
 
-interface RequestState {
+interface RequestForm {
   method: HttpMethod
   url: string
   params: KeyValueRow[]
   headers: KeyValueRow[]
   auth: HttpAuthConfig
   body: HttpBodyConfig
-  options: Pick<HttpOptions, 'timeoutMs' | 'followRedirects' | 'ignoreTlsErrors' | 'responseMode'>
+  options: {
+    timeoutMs: number
+    followRedirects: boolean
+    ignoreTlsErrors: boolean
+    responseMode: ResponseMode
+  }
 }
 
-const STORAGE_KEY = 'devtoolbox.api.state.v1'
+/** 记住上次选中的项目 / 请求，下次打开直接回到现场 */
+const SELECTION_KEY = 'devtoolbox.api.selection.v2'
+/** 旧版本把单个草稿存在 localStorage，这里顺手清理 */
+const LEGACY_STATE_KEY = 'devtoolbox.api.state.v1'
+
 const MAX_DISPLAY_BYTES = 5 * 1024 * 1024
 const TREE_LIMIT = 1024 * 1024
+/** 停止输入后多久自动保存到数据文件 */
+const AUTOSAVE_DELAY = 600
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 const BODY_TYPES: { label: string; value: BodyType }[] = [
@@ -77,7 +95,7 @@ const newFormRow = (kind: 'text' | 'file' = 'text'): FormRow => ({
   filePath: ''
 })
 
-function defaultState(): RequestState {
+function defaultForm(): RequestForm {
   return {
     method: 'GET',
     url: '',
@@ -97,27 +115,21 @@ function defaultState(): RequestState {
   }
 }
 
-function loadState(): RequestState {
-  const fallback = defaultState()
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return fallback
-    const parsed = JSON.parse(raw) as Partial<RequestState>
-    return {
-      ...fallback,
-      ...parsed,
-      auth: { ...fallback.auth, ...(parsed.auth ?? {}) },
-      body: { ...fallback.body, ...(parsed.body ?? {}) },
-      options: { ...fallback.options, ...(parsed.options ?? {}) },
-      params: Array.isArray(parsed.params) && parsed.params.length ? parsed.params : fallback.params,
-      headers: Array.isArray(parsed.headers) && parsed.headers.length ? parsed.headers : fallback.headers
-    }
-  } catch {
-    return fallback
-  }
-}
+/* ------------------------------ 界面状态 ------------------------------ */
 
-const state = reactive<RequestState>(loadState())
+const projects = ref<ApiProject[]>([])
+const dataFile = ref('')
+const currentProjectId = ref('')
+const currentRequestId = ref('')
+const draftName = ref('')
+
+const state = reactive<RequestForm>(defaultForm())
+const loading = ref(true)
+const dirty = ref(false)
+const saveError = ref('')
+const lastSavedAt = ref(0)
+const pendingSaves = ref(0)
+
 const requestTab = ref('params')
 const responseTab = ref('body')
 const bodyView = ref<'pretty' | 'tree'>('pretty')
@@ -126,8 +138,13 @@ const progress = ref(0)
 const activeRequestId = ref('')
 const response = ref<HttpResponseResult | null>(null)
 const sentRequest = shallowRef<{ method: string; url: string; headers: KeyValueRow[] } | null>(null)
-const historyEntries = ref<ApiHistoryEntry[]>([])
-const historyOpen = ref(false)
+
+const currentProject = computed(() => projects.value.find((item) => item.id === currentProjectId.value) ?? null)
+const currentRequests = computed(() => currentProject.value?.requests ?? [])
+const currentRecord = computed(
+  () => currentRequests.value.find((item) => item.id === currentRequestId.value) ?? null
+)
+const saving = computed(() => pendingSaves.value > 0)
 
 const methodColor = computed(() => {
   const map: Record<string, string> = {
@@ -168,24 +185,472 @@ const prettyBody = computed<{ text: string; isJson: boolean; data: unknown }>(()
 })
 
 const canShowTree = computed(() => prettyBody.value.isJson && prettyBody.value.text.length < TREE_LIMIT)
-
 const hasResponse = computed(() => response.value !== null)
+const currentBodyType = computed(() => state.body.type)
+const showRawEditor = computed(() => ['json', 'text', 'xml'].includes(state.body.type))
+const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(state.body.type))
 
-let saveTimer: number | undefined
-watch(
-  state,
-  () => {
-    if (saveTimer) window.clearTimeout(saveTimer)
-    saveTimer = window.setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-      } catch {
-        // 忽略持久化失败
-      }
-    }, 400)
-  },
-  { deep: true }
-)
+/* --------------------------- 未保存状态提示 --------------------------- */
+
+function snapshotForm(): RequestForm {
+  return {
+    method: state.method,
+    url: state.url,
+    params: state.params.map((row) => ({ ...row })),
+    headers: state.headers.map((row) => ({ ...row })),
+    auth: { ...state.auth },
+    body: { ...state.body, form: state.body.form.map((row) => ({ ...row })) },
+    options: { ...state.options }
+  }
+}
+
+function formSignature(): string {
+  return JSON.stringify({ name: draftName.value, form: snapshotForm() })
+}
+
+/** 记录「当前表单对应哪份已落盘的内容」，用于判断是否有未保存修改 */
+let lastSavedSignature = ''
+
+let suspendTracking = false
+
+function markDirty(): void {
+  if (suspendTracking || !currentRequestId.value) return
+  const changed = formSignature() !== lastSavedSignature
+  if (changed) saveError.value = ''
+  dirty.value = changed
+  if (changed) scheduleAutosave()
+  else clearAutosave()
+}
+
+watch(state, markDirty, { deep: true, flush: 'sync' })
+watch(draftName, markDirty, { flush: 'sync' })
+
+/* ------------------------------ 自动保存 ------------------------------ */
+
+let autosaveTimer: number | undefined
+let saveChain: Promise<void> = Promise.resolve()
+
+function clearAutosave(): void {
+  if (autosaveTimer !== undefined) {
+    window.clearTimeout(autosaveTimer)
+    autosaveTimer = undefined
+  }
+}
+
+function scheduleAutosave(): void {
+  clearAutosave()
+  autosaveTimer = window.setTimeout(() => {
+    autosaveTimer = undefined
+    void flushSave()
+  }, AUTOSAVE_DELAY)
+}
+
+/** 所有保存串行执行，避免并发写同一个数据文件 */
+function queueSave(): Promise<void> {
+  const task = (): Promise<void> => saveOnce()
+  saveChain = saveChain.then(task, task)
+  return saveChain
+}
+
+/** 立即把当前修改写入数据文件（不会重复保存没有变化的内容） */
+async function flushSave(): Promise<void> {
+  clearAutosave()
+  if (!dirty.value || !currentRequestId.value) return saveChain
+  await queueSave()
+}
+
+async function saveOnce(): Promise<void> {
+  if (!dirty.value || !currentRequestId.value || !currentProjectId.value) return
+
+  const projectId = currentProjectId.value
+  const requestId = currentRequestId.value
+  const sentSignature = formSignature()
+
+  pendingSaves.value += 1
+  saveError.value = ''
+  try {
+    const result = await window.api.projects.saveRequest(projectId, buildDraft())
+    applyProjects(result.projects)
+
+    if (currentRequestId.value !== requestId) return
+
+    // 名称为空时由主进程按地址补全，同步回输入框
+    if (result.record.name !== draftName.value) {
+      suspendTracking = true
+      draftName.value = result.record.name
+      suspendTracking = false
+    }
+
+    lastSavedAt.value = Date.now()
+    if (formSignature() === sentSignature) {
+      lastSavedSignature = formSignature()
+      dirty.value = false
+    } else {
+      // 保存期间又改动了内容，稍后再存一次
+      dirty.value = true
+      scheduleAutosave()
+    }
+  } catch (error) {
+    saveError.value = (error as Error).message
+    dirty.value = true
+    ElMessage.error(`保存请求失败：${saveError.value}`)
+  } finally {
+    pendingSaves.value = Math.max(0, pendingSaves.value - 1)
+  }
+}
+
+const saveStateText = computed(() => {
+  if (saveError.value) return '保存失败，点击「保存」重试'
+  if (saving.value) return '正在保存…'
+  if (dirty.value) return '有未保存的修改，即将自动保存'
+  return lastSavedAt.value ? `已保存 ${clockText(lastSavedAt.value)}` : '已保存到本地文件'
+})
+
+const saveTooltip = computed(() => {
+  if (!currentRequestId.value) return '先点击「新请求」创建一条请求记录'
+  if (saveError.value) return `保存失败：${saveError.value}`
+  if (dirty.value) return '有未保存的修改，停止输入后会自动保存（Ctrl+S 立即保存）'
+  return lastSavedAt.value
+    ? `已自动保存于 ${clockText(lastSavedAt.value)}（Ctrl+S 立即保存）`
+    : '已保存到本地文件（Ctrl+S 立即保存）'
+})
+
+function clockText(timestamp: number): string {
+  const date = new Date(timestamp)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/* ---------------------------- 项目 / 请求数据 ---------------------------- */
+
+function applyProjects(next: ApiProject[]): void {
+  projects.value = next
+  if (!next.some((item) => item.id === currentProjectId.value)) {
+    currentProjectId.value = next[0]?.id ?? ''
+  }
+}
+
+function saveSelection(): void {
+  try {
+    localStorage.setItem(
+      SELECTION_KEY,
+      JSON.stringify({ projectId: currentProjectId.value, requestId: currentRequestId.value })
+    )
+  } catch {
+    // 忽略 localStorage 不可用
+  }
+}
+
+function readSelection(): { projectId?: string; requestId?: string } {
+  try {
+    const raw = localStorage.getItem(SELECTION_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as { projectId?: unknown; requestId?: unknown }
+    return {
+      projectId: typeof parsed.projectId === 'string' ? parsed.projectId : undefined,
+      requestId: typeof parsed.requestId === 'string' ? parsed.requestId : undefined
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** 把一条请求记录载入表单；传入 null 表示进入「未选中」状态 */
+function loadRecord(record: ApiRequestRecord | null): void {
+  suspendTracking = true
+  currentRequestId.value = record?.id ?? ''
+  if (record) {
+    Object.assign(state, {
+      method: record.method,
+      url: record.url,
+      params: record.params.length ? record.params.map((row) => ({ ...row, id: randomId() })) : [newRow()],
+      headers: record.headers.length ? record.headers.map((row) => ({ ...row, id: randomId() })) : [newRow()],
+      auth: { ...record.auth },
+      body: {
+        ...record.body,
+        form: record.body.form.length
+          ? record.body.form.map((row) => ({ ...row, id: randomId() }))
+          : [newFormRow()]
+      },
+      options: { ...state.options, ...record.options }
+    })
+    draftName.value = record.name
+    requestTab.value = record.body.type === 'none' ? 'params' : 'body'
+  } else {
+    Object.assign(state, defaultForm())
+    draftName.value = ''
+  }
+  suspendTracking = false
+  dirty.value = false
+  saveError.value = ''
+  lastSavedAt.value = 0
+  lastSavedSignature = formSignature()
+  response.value = null
+  sentRequest.value = null
+}
+
+function buildDraft(): ApiRequestDraft {
+  const form = snapshotForm()
+  return {
+    id: currentRequestId.value,
+    name: draftName.value.trim(),
+    ...form
+  }
+}
+
+/* ------------------------------ 选择切换 ------------------------------ */
+
+async function selectRequest(id: string): Promise<void> {
+  if (!id || id === currentRequestId.value) return
+  await flushSave()
+  const record = currentRequests.value.find((item) => item.id === id) ?? null
+  loadRecord(record)
+  saveSelection()
+}
+
+async function switchProject(projectId: string): Promise<void> {
+  if (!projectId || projectId === currentProjectId.value) return
+  if (!projects.value.some((item) => item.id === projectId)) return
+  await flushSave()
+  currentProjectId.value = projectId
+  const project = projects.value.find((item) => item.id === projectId)
+  loadRecord(project?.requests[0] ?? null)
+  saveSelection()
+}
+
+/* ------------------------------ 新建 / 删除 ------------------------------ */
+
+function emptyDraft(name: string): ApiRequestDraft {
+  return { id: '', name, ...defaultForm() }
+}
+
+async function createRequest(): Promise<void> {
+  const project = currentProject.value
+  if (!project) {
+    ElMessage.warning('请先创建一个项目')
+    return
+  }
+  await flushSave()
+  try {
+    const result = await window.api.projects.saveRequest(
+      project.id,
+      emptyDraft(`新请求 ${project.requests.length + 1}`)
+    )
+    applyProjects(result.projects)
+    currentProjectId.value = project.id
+    loadRecord(result.record)
+    saveSelection()
+    ElMessage.success(`已创建请求「${result.record.name}」`)
+  } catch (error) {
+    ElMessage.error(`创建请求失败：${(error as Error).message}`)
+  }
+}
+
+async function duplicateRequest(id: string): Promise<void> {
+  const project = currentProject.value
+  const record = currentRequests.value.find((item) => item.id === id)
+  if (!project || !record) return
+  await flushSave()
+  try {
+    const result = await window.api.projects.saveRequest(project.id, {
+      id: '',
+      name: `${record.name} 副本`,
+      method: record.method,
+      url: record.url,
+      params: record.params.map((row) => ({ ...row })),
+      headers: record.headers.map((row) => ({ ...row })),
+      auth: { ...record.auth },
+      body: { ...record.body, form: record.body.form.map((row) => ({ ...row })) },
+      options: { ...record.options }
+    })
+    applyProjects(result.projects)
+    loadRecord(result.record)
+    saveSelection()
+    ElMessage.success(`已复制为「${result.record.name}」`)
+  } catch (error) {
+    ElMessage.error(`复制请求失败：${(error as Error).message}`)
+  }
+}
+
+async function deleteRequest(id: string): Promise<void> {
+  const project = currentProject.value
+  const record = currentRequests.value.find((item) => item.id === id)
+  if (!project || !record) return
+  try {
+    await ElMessageBox.confirm(`确定删除请求「${record.name}」吗？删除后无法恢复。`, '删除请求', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  try {
+    const next = await window.api.projects.removeRequest(project.id, id)
+    applyProjects(next)
+    if (currentRequestId.value === id) {
+      loadRecord(next.find((item) => item.id === project.id)?.requests[0] ?? null)
+      saveSelection()
+    }
+  } catch (error) {
+    ElMessage.error(`删除请求失败：${(error as Error).message}`)
+  }
+}
+
+/* ------------------------------ 项目管理 ------------------------------ */
+
+async function promptProjectName(title: string, initial: string): Promise<string | null> {
+  try {
+    const result = (await ElMessageBox.prompt('项目名称', title, {
+      inputValue: initial,
+      inputPlaceholder: '请输入项目名称',
+      inputValidator: (value: string) => (value && value.trim() ? true : '项目名称不能为空'),
+      confirmButtonText: '确定',
+      cancelButtonText: '取消'
+    })) as unknown as { value?: string }
+    return String(result.value ?? '').trim() || null
+  } catch {
+    return null
+  }
+}
+
+async function onProjectCommand(command: string | number | object): Promise<void> {
+  switch (String(command)) {
+    case 'create':
+      await createProject()
+      break
+    case 'rename':
+      await renameCurrentProject()
+      break
+    case 'remove':
+      await removeCurrentProject()
+      break
+    case 'export':
+      await exportProjects()
+      break
+    case 'import':
+      await importProjects()
+      break
+    case 'reveal':
+      await revealDataFile()
+      break
+    default:
+      break
+  }
+}
+
+async function createProject(): Promise<void> {
+  const name = await promptProjectName('新建项目', `项目 ${projects.value.length + 1}`)
+  if (!name) return
+  await flushSave()
+  try {
+    const next = await window.api.projects.create(name)
+    applyProjects(next)
+    const created = next.find((item) => item.name === name) ?? next[next.length - 1]
+    currentProjectId.value = created.id
+    loadRecord(null)
+    saveSelection()
+    ElMessage.success(`项目「${created.name}」已创建`)
+  } catch (error) {
+    ElMessage.error(`新建项目失败：${(error as Error).message}`)
+  }
+}
+
+async function renameCurrentProject(): Promise<void> {
+  const project = currentProject.value
+  if (!project) return
+  const name = await promptProjectName('重命名项目', project.name)
+  if (!name || name === project.name) return
+  try {
+    applyProjects(await window.api.projects.rename(project.id, name))
+    ElMessage.success('项目已重命名')
+  } catch (error) {
+    ElMessage.error(`重命名失败：${(error as Error).message}`)
+  }
+}
+
+async function removeCurrentProject(): Promise<void> {
+  const project = currentProject.value
+  if (!project) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除项目「${project.name}」及其中 ${project.requests.length} 条请求记录吗？删除后无法恢复。`,
+      '删除项目',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  clearAutosave()
+  dirty.value = false
+  try {
+    const next = await window.api.projects.remove(project.id)
+    applyProjects(next)
+    const fallback = next[0]
+    currentProjectId.value = fallback?.id ?? ''
+    loadRecord(fallback?.requests[0] ?? null)
+    saveSelection()
+    ElMessage.success('项目已删除')
+  } catch (error) {
+    ElMessage.error(`删除项目失败：${(error as Error).message}`)
+  }
+}
+
+async function exportProjects(): Promise<void> {
+  await flushSave()
+  try {
+    const result = await window.api.projects.exportAll()
+    if (result.canceled) return
+    if (result.error) {
+      ElMessage.error(`导出失败：${result.error}`)
+      return
+    }
+    ElMessage.success(`已导出 ${result.requests ?? 0} 条请求到 ${result.filePath ?? ''}`)
+    if (result.filePath) await window.api.app.showItemInFolder(result.filePath)
+  } catch (error) {
+    ElMessage.error(`导出失败：${(error as Error).message}`)
+  }
+}
+
+async function importProjects(): Promise<void> {
+  await flushSave()
+  try {
+    const result = await window.api.projects.importFile()
+    if (result.canceled) return
+    if (result.error) {
+      ElMessage.error(`导入失败：${result.error}`)
+      return
+    }
+    if (result.projects) {
+      applyProjects(result.projects)
+      await reloadCurrentSelection()
+    }
+    ElMessage.success(
+      `导入完成：新增 ${result.importedProjects ?? 0} 个项目、${result.importedRequests ?? 0} 条请求`
+    )
+  } catch (error) {
+    ElMessage.error(`导入失败：${(error as Error).message}`)
+  }
+}
+
+async function reloadCurrentSelection(): Promise<void> {
+  const project = projects.value.find((item) => item.id === currentProjectId.value) ?? projects.value[0]
+  currentProjectId.value = project?.id ?? ''
+  const record =
+    project?.requests.find((item) => item.id === currentRequestId.value) ?? project?.requests[0] ?? null
+  loadRecord(record)
+  saveSelection()
+}
+
+async function revealDataFile(): Promise<void> {
+  try {
+    await window.api.projects.reveal()
+  } catch (error) {
+    ElMessage.error(`打开数据文件位置失败：${(error as Error).message}`)
+  }
+}
+
+/* ------------------------------ 发送请求 ------------------------------ */
 
 function suggestFileName(): string {
   const raw = state.url.trim()
@@ -202,10 +667,17 @@ function suggestFileName(): string {
 
 async function send(): Promise<void> {
   if (sending.value) return
+  if (!currentRequestId.value) {
+    ElMessage.warning('请先点击「新请求」创建一条请求记录')
+    return
+  }
   if (!state.url.trim()) {
     ElMessage.warning('请先填写请求地址')
     return
   }
+
+  // 发送前先把当前内容落盘，确保请求与记录一致
+  await flushSave()
 
   let outputPath = ''
   if (state.options.responseMode === 'file') {
@@ -255,86 +727,19 @@ async function send(): Promise<void> {
   } finally {
     sending.value = false
     activeRequestId.value = ''
-    // 每次发送后自动记录，重复请求会更新时间并置顶
-    void rememberRequest(requestConfig, { status, ok, durationMs })
+    void persistAttempt({ status, ok, durationMs })
   }
 }
 
-/** 把本次请求写入历史（相同请求自动去重） */
-async function rememberRequest(
-  config: HttpRequestConfig,
-  result: { status?: number; ok: boolean; durationMs: number }
-): Promise<void> {
+/** 把最近一次发送结果写回请求记录，便于在列表中看到状态码 */
+async function persistAttempt(result: ApiAttemptResult): Promise<void> {
+  const projectId = currentProjectId.value
+  const requestId = currentRequestId.value
+  if (!projectId || !requestId) return
   try {
-    historyEntries.value = await window.api.history.add({
-      method: config.method,
-      url: config.url,
-      params: config.params,
-      headers: config.headers,
-      auth: config.auth,
-      body: config.body,
-      options: {
-        timeoutMs: config.options.timeoutMs,
-        followRedirects: config.options.followRedirects,
-        ignoreTlsErrors: config.options.ignoreTlsErrors,
-        responseMode: config.options.responseMode
-      },
-      status: result.status,
-      ok: result.ok,
-      durationMs: result.durationMs
-    })
+    applyProjects(await window.api.projects.recordResult(projectId, requestId, result))
   } catch (error) {
-    console.error('[history] 保存请求记录失败', error)
-  }
-}
-
-/** 从历史记录回填表单 */
-function applyHistory(entry: ApiHistoryEntry): void {
-  state.method = entry.method
-  state.url = entry.url
-  state.params = entry.params.length
-    ? entry.params.map((row) => ({ ...row, id: randomId() }))
-    : [newRow()]
-  state.headers = entry.headers.length
-    ? entry.headers.map((row) => ({ ...row, id: randomId() }))
-    : [newRow()]
-  state.auth = { ...entry.auth }
-  state.body = {
-    ...entry.body,
-    form: entry.body.form.length ? entry.body.form.map((row) => ({ ...row, id: randomId() })) : [newFormRow()]
-  }
-  state.options = { ...state.options, ...entry.options }
-  requestTab.value = entry.body.type === 'none' ? 'params' : 'body'
-  historyOpen.value = false
-  response.value = null
-  sentRequest.value = null
-  ElMessage.success('已载入历史请求')
-}
-
-async function removeHistoryEntry(id: string): Promise<void> {
-  try {
-    historyEntries.value = await window.api.history.remove(id)
-  } catch (error) {
-    ElMessage.error(`删除失败：${(error as Error).message}`)
-  }
-}
-
-async function clearHistoryList(): Promise<void> {
-  if (historyEntries.value.length === 0) return
-  try {
-    await ElMessageBox.confirm('清空后无法恢复，确定要清空全部请求记录吗？', '清空请求历史', {
-      type: 'warning',
-      confirmButtonText: '清空',
-      cancelButtonText: '取消'
-    })
-  } catch {
-    return
-  }
-  try {
-    historyEntries.value = await window.api.history.clear()
-    ElMessage.success('已清空请求历史')
-  } catch (error) {
-    ElMessage.error(`清空失败：${(error as Error).message}`)
+    console.error('[api] 保存请求结果失败', error)
   }
 }
 
@@ -342,6 +747,8 @@ async function abort(): Promise<void> {
   if (!activeRequestId.value) return
   await window.api.http.abort(activeRequestId.value)
 }
+
+/* ------------------------------ 响应操作 ------------------------------ */
 
 async function copyResponseBody(): Promise<void> {
   const text = prettyBody.value.text || response.value?.bodyText || ''
@@ -369,6 +776,13 @@ async function saveResponseBody(): Promise<void> {
   }
 }
 
+function openSavedFile(): void {
+  const target = response.value?.bodyPath
+  if (target) void window.api.app.showItemInFolder(target)
+}
+
+/* ------------------------------ 表单操作 ------------------------------ */
+
 async function pickBodyFile(): Promise<void> {
   const pick = await window.api.dialog.openFile({ title: '选择要上传的文件' })
   if (pick.canceled || !pick.filePath) return
@@ -395,348 +809,506 @@ function toggleFormKind(row: FormRow): void {
   if (row.kind === 'text') row.filePath = ''
 }
 
-function resetRequest(): void {
-  const fresh = defaultState()
-  Object.assign(state, fresh)
+function resetForm(): void {
+  if (!currentRequestId.value) return
+  Object.assign(state, defaultForm())
   response.value = null
   sentRequest.value = null
 }
 
-function openSavedFile(): void {
-  const target = response.value?.bodyPath
-  if (target) void window.api.app.showItemInFolder(target)
+async function manualSave(): Promise<void> {
+  if (!currentRequestId.value) {
+    ElMessage.warning('请先点击「新请求」创建一条请求记录')
+    return
+  }
+  await flushSave()
+  if (!dirty.value && !saveError.value) ElMessage.success('已保存到本地数据文件')
 }
 
+/* ------------------------------ 生命周期 ------------------------------ */
+
+let active = false
 let progressUnsubscribe: (() => void) | undefined
+
+function onKeydown(event: KeyboardEvent): void {
+  if (!active) return
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault()
+    void manualSave()
+  }
+}
+
+/** 窗口失焦 / 切到后台时立即保存，避免刚输入的内容来不及落盘 */
+function onWindowBlur(): void {
+  if (active) void flushSave()
+}
+
+function onVisibilityChange(): void {
+  if (active && document.visibilityState === 'hidden') void flushSave()
+}
+
+async function loadAll(): Promise<void> {
+  loading.value = true
+  try {
+    const store = await window.api.projects.load()
+    projects.value = store.projects
+    dataFile.value = store.dataFile
+
+    const selection = readSelection()
+    const project = store.projects.find((item) => item.id === selection.projectId) ?? store.projects[0]
+    currentProjectId.value = project?.id ?? ''
+    const record =
+      project?.requests.find((item) => item.id === selection.requestId) ?? project?.requests[0] ?? null
+    loadRecord(record)
+    saveSelection()
+  } catch (error) {
+    ElMessage.error(`读取请求数据失败：${(error as Error).message}`)
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(async () => {
   progressUnsubscribe = window.api.http.onProgress((payload) => {
     if (payload.requestId !== activeRequestId.value) return
     progress.value = payload.total > 0 ? Math.min(99, Math.round((payload.loaded / payload.total) * 100)) : 0
   })
+  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('blur', onWindowBlur)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   try {
-    historyEntries.value = await window.api.history.list()
-  } catch (error) {
-    console.error('[history] 读取请求记录失败', error)
+    localStorage.removeItem(LEGACY_STATE_KEY)
+  } catch {
+    // 忽略
   }
+  await loadAll()
 })
-onUnmounted(() => progressUnsubscribe?.())
 
-const currentBodyType = computed(() => state.body.type)
-const showRawEditor = computed(() => ['json', 'text', 'xml'].includes(state.body.type))
-const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(state.body.type))
+onActivated(() => {
+  active = true
+})
+
+onDeactivated(() => {
+  active = false
+  void flushSave()
+})
+
+onUnmounted(() => {
+  active = false
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('blur', onWindowBlur)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  progressUnsubscribe?.()
+  void flushSave()
+})
 </script>
 
 <template>
   <div class="page api-page">
-    <div class="url-bar">
-      <el-select v-model="state.method" class="method-select" :style="{ color: methodColor }">
-        <el-option v-for="method in METHODS" :key="method" :label="method" :value="method" />
+    <div class="page-toolbar project-bar">
+      <span class="bar-label">项目</span>
+      <el-select
+        :model-value="currentProjectId"
+        class="project-select"
+        placeholder="选择项目"
+        :disabled="loading || projects.length === 0"
+        @change="switchProject"
+      >
+        <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id">
+          <div class="project-option">
+            <span class="option-name">{{ project.name }}</span>
+            <span class="option-count">{{ project.requests.length }}</span>
+          </div>
+        </el-option>
       </el-select>
-      <el-input
-        v-model="state.url"
-        class="url-input"
-        placeholder="请输入请求地址，例如 https://httpbin.org/get"
-        clearable
-        @keydown.enter="send"
-      />
-      <el-button v-if="!sending" type="primary" :icon="Promotion" class="send-btn" @click="send">发送</el-button>
-      <el-button v-else type="danger" :icon="VideoPause" class="send-btn" @click="abort">取消</el-button>
-      <el-button :icon="Clock" @click="historyOpen = true">
-        请求列表<span v-if="historyEntries.length" class="history-count">{{ historyEntries.length }}</span>
-      </el-button>
-      <el-button :icon="Refresh" @click="resetRequest">重置</el-button>
+
+      <el-dropdown trigger="click" :disabled="!currentProject" @command="onProjectCommand">
+        <el-button class="project-menu-btn">
+          项目管理
+          <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="create" :icon="Plus">新建项目</el-dropdown-item>
+            <el-dropdown-item command="rename" :icon="EditPen">重命名当前项目</el-dropdown-item>
+            <el-dropdown-item command="remove" :icon="Delete" divided>删除当前项目</el-dropdown-item>
+            <el-dropdown-item command="export" :icon="Download" divided>导出全部数据…</el-dropdown-item>
+            <el-dropdown-item command="import" :icon="Upload">导入数据…</el-dropdown-item>
+            <el-dropdown-item command="reveal" :icon="FolderOpened">打开数据文件位置</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+
+      <span class="spacer" />
+      <span v-if="currentProject" class="small muted project-summary">
+        {{ currentProject.requests.length }} 条请求 · 自动保存到本地文件
+      </span>
+      <el-button :icon="Plus" @click="createRequest">新请求</el-button>
+      <el-tooltip :content="saveTooltip" placement="bottom">
+        <el-badge is-dot :hidden="!dirty" class="save-badge">
+          <el-button :icon="Check" :disabled="!currentRequestId" :loading="saving" @click="manualSave">
+            保存
+          </el-button>
+        </el-badge>
+      </el-tooltip>
     </div>
 
-    <el-progress v-if="sending && progress > 0" :percentage="progress" :stroke-width="4" :show-text="false" class="send-progress" />
+    <div class="page-body">
+      <ApiRequestList
+        :requests="currentRequests"
+        :current-id="currentRequestId"
+        :dirty-id="dirty ? currentRequestId : ''"
+        :data-file="dataFile"
+        @select="selectRequest"
+        @duplicate="duplicateRequest"
+        @remove="deleteRequest"
+        @reveal="revealDataFile"
+      />
 
-    <section class="panel request-panel">
-      <el-tabs v-model="requestTab" class="request-tabs">
-        <el-tab-pane name="params">
-          <template #label>
-            <span>参数</span>
-            <span class="tab-badge">{{ state.params.filter((row) => row.enabled && row.key).length }}</span>
-          </template>
-          <KeyValueEditor v-model="state.params" key-placeholder="参数名" value-placeholder="参数值" />
-        </el-tab-pane>
+      <div v-if="!currentRequestId" class="panel empty-main">
+        <el-icon :size="34" class="empty-icon"><DocumentAdd /></el-icon>
+        <div class="empty-title">还没有选中请求</div>
+        <div class="small muted empty-desc">
+          点击右上角「新请求」创建一条请求记录；也可以从左侧列表选择已有请求。
+        </div>
+        <el-button type="primary" :icon="Plus" @click="createRequest">新请求</el-button>
+      </div>
 
-        <el-tab-pane name="headers">
-          <template #label>
-            <span>请求头</span>
-            <span class="tab-badge">{{ state.headers.filter((row) => row.enabled && row.key).length }}</span>
-          </template>
-          <KeyValueEditor v-model="state.headers" key-placeholder="Header 名称" value-placeholder="Header 值" />
-        </el-tab-pane>
+      <div v-else class="api-main">
+        <div class="url-bar">
+          <el-select v-model="state.method" class="method-select" :style="{ color: methodColor }">
+            <el-option v-for="method in METHODS" :key="method" :label="method" :value="method" />
+          </el-select>
+          <el-input
+            v-model="state.url"
+            class="url-input"
+            placeholder="请输入请求地址，例如 https://httpbin.org/get"
+            clearable
+            @keydown.enter="send"
+          />
+          <el-button v-if="!sending" type="primary" :icon="Promotion" class="send-btn" @click="send">发送</el-button>
+          <el-button v-else type="danger" :icon="VideoPause" class="send-btn" @click="abort">取消</el-button>
+          <el-button :icon="Refresh" @click="resetForm">重置</el-button>
+        </div>
 
-        <el-tab-pane label="鉴权" name="auth">
-          <div class="auth-form">
-            <div class="form-row">
-              <span class="form-label">鉴权方式</span>
-              <el-select v-model="state.auth.type" style="width: 200px">
-                <el-option v-for="item in AUTH_TYPES" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-            </div>
-
-            <template v-if="state.auth.type === 'bearer'">
-              <div class="form-row">
-                <span class="form-label">Token</span>
-                <el-input v-model="state.auth.token" placeholder="粘贴 Bearer Token" show-password />
-              </div>
-              <div class="small muted form-tip">发送时会自动附加请求头 Authorization: Bearer &lt;token&gt;</div>
-            </template>
-
-            <template v-else-if="state.auth.type === 'basic'">
-              <div class="form-row">
-                <span class="form-label">用户名</span>
-                <el-input v-model="state.auth.username" placeholder="Username" />
-              </div>
-              <div class="form-row">
-                <span class="form-label">密码</span>
-                <el-input v-model="state.auth.password" type="password" show-password placeholder="Password" />
-              </div>
-            </template>
-
-            <template v-else-if="state.auth.type === 'api-key'">
-              <div class="form-row">
-                <span class="form-label">参数名</span>
-                <el-input v-model="state.auth.keyName" placeholder="例如 X-API-KEY" style="width: 260px" />
-                <span class="form-label">参数值</span>
-                <el-input v-model="state.auth.keyValue" placeholder="API Key" show-password style="width: 260px" />
-              </div>
-              <div class="form-row">
-                <span class="form-label">添加位置</span>
-                <SegmentedControl
-                  :model-value="state.auth.addTo"
-                  :options="[
-                    { label: '请求头', value: 'header' },
-                    { label: '查询参数', value: 'query' }
-                  ]"
-                  size="small"
-                  @update:model-value="(value) => (state.auth.addTo = value === 'query' ? 'query' : 'header')"
-                />
-              </div>
-            </template>
-
-            <div v-else class="small muted">当前请求不附加鉴权信息。</div>
-          </div>
-        </el-tab-pane>
-
-        <el-tab-pane label="请求体" name="body">
-          <div class="body-form">
-            <div class="form-row">
-              <span class="form-label">类型</span>
-              <el-select v-model="state.body.type" style="width: 200px">
-                <el-option v-for="item in BODY_TYPES" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-              <template v-if="currentBodyType !== 'none'">
-                <span class="form-label">Content-Type</span>
-                <el-input
-                  v-model="state.body.contentType"
-                  placeholder="留空则自动推断"
-                  style="width: 280px"
-                />
-              </template>
-            </div>
-
-            <template v-if="showRawEditor">
-              <el-input
-                v-model="state.body.raw"
-                type="textarea"
-                :rows="7"
-                resize="none"
-                class="body-raw mono"
-                :placeholder="
-                  state.body.type === 'json'
-                    ? '{&quot;name&quot;: &quot;devtoolbox&quot;}'
-                    : state.body.type === 'xml'
-                      ? '&lt;root&gt;&lt;/root&gt;'
-                      : '纯文本内容'
-                "
-              />
-            </template>
-
-            <template v-else-if="showFormEditor">
-              <div v-if="state.body.form.length === 0" class="small muted">暂无字段</div>
-              <div v-for="row in state.body.form" :key="row.id" class="form-data-row">
-                <el-checkbox v-model="row.enabled" />
-                <el-input v-model="row.key" size="small" placeholder="字段名" style="width: 220px" />
-                <template v-if="row.kind === 'file'">
-                  <el-input :model-value="row.filePath" size="small" readonly placeholder="未选择文件" class="flex-1" />
-                  <el-button size="small" :icon="FolderOpened" @click="pickFormFile(row)">选择</el-button>
-                </template>
-                <el-input v-else v-model="row.value" size="small" placeholder="字段值" class="flex-1" />
-                <el-button size="small" text @click="toggleFormKind(row)">
-                  {{ row.kind === 'file' ? '改为文本' : '改为文件' }}
-                </el-button>
-                <el-button size="small" text type="danger" @click="removeFormRow(row.id)">删除</el-button>
-              </div>
-              <el-button size="small" text type="primary" @click="addFormRow">+ 添加字段</el-button>
-            </template>
-
-            <template v-else-if="currentBodyType === 'binary'">
-              <div class="form-row">
-                <span class="form-label">文件</span>
-                <el-input :model-value="state.body.filePath" readonly placeholder="选择要作为请求体的文件" class="flex-1" />
-                <el-button :icon="FolderOpened" @click="pickBodyFile">选择文件</el-button>
-              </div>
-            </template>
-
-            <div v-else class="small muted">该请求不携带请求体。</div>
-          </div>
-        </el-tab-pane>
-
-        <el-tab-pane label="选项" name="options">
-          <div class="options-form">
-            <div class="form-row">
-              <span class="form-label">超时时间</span>
-              <el-input-number v-model="state.options.timeoutMs" :min="1000" :max="600000" :step="1000" controls-position="right" />
-              <span class="small muted">毫秒</span>
-            </div>
-            <div class="form-row">
-              <span class="form-label">跟随重定向</span>
-              <el-switch v-model="state.options.followRedirects" />
-              <span class="form-label" style="margin-left: 24px">忽略证书错误</span>
-              <el-switch v-model="state.options.ignoreTlsErrors" />
-            </div>
-            <div class="form-row">
-              <span class="form-label">响应处理</span>
-              <SegmentedControl
-                :model-value="state.options.responseMode"
-                :options="RESPONSE_MODES"
-                size="small"
-                @update:model-value="(value) => (state.options.responseMode = value as ResponseMode)"
-              />
-              <span class="small muted">
-                {{
-                  state.options.responseMode === 'file'
-                    ? '发送前选择保存路径，响应直接写入文件'
-                    : `响应内容最多展示 ${formatBytes(MAX_DISPLAY_BYTES)}`
-                }}
-              </span>
-            </div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
-    </section>
-
-    <section class="panel response-panel">
-      <div class="panel-header response-head">
-        <span class="panel-title">响应</span>
-        <template v-if="response">
-          <span v-if="response.status" class="status-pill" :class="`is-${statusType}`">
-            {{ response.status }} {{ response.statusText }}
+        <div class="name-bar">
+          <span class="small muted bar-label-inline">名称</span>
+          <el-input
+            v-model="draftName"
+            size="small"
+            class="name-input"
+            maxlength="60"
+            placeholder="给这条请求起个名字，例如：获取用户列表"
+          />
+          <span class="save-state" :class="{ pending: dirty && !saveError, failed: Boolean(saveError) }">
+            {{ saveStateText }}
           </span>
-          <span class="small muted">耗时 {{ formatDuration(response.durationMs) }}</span>
-          <span class="small muted">大小 {{ formatBytes(response.size) }}</span>
-          <span v-if="response.contentType" class="small muted type-text">{{ response.contentType }}</span>
-        </template>
-        <span class="spacer" />
-        <el-button
-          v-if="response?.bodyPath"
-          size="small"
-          :icon="FolderOpened"
-          @click="openSavedFile"
-        >
-          打开所在目录
-        </el-button>
-        <el-button
-          v-if="response?.bodyText"
-          size="small"
-          :icon="Download"
-          @click="saveResponseBody"
-        >
-          保存响应
-        </el-button>
-        <el-button
-          v-if="response?.bodyText"
-          size="small"
-          :icon="CopyDocument"
-          @click="copyResponseBody"
-        >
-          复制
-        </el-button>
-      </div>
+          <span class="spacer" />
+          <span class="small muted request-info" v-if="currentRecord">
+            最近更新 {{ new Date(currentRecord.updatedAt).toLocaleString('zh-CN', { hour12: false }) }}
+          </span>
+        </div>
 
-      <el-tabs v-if="hasResponse" v-model="responseTab" class="response-tabs">
-        <el-tab-pane label="响应体" name="body">
-          <div v-if="response?.error" class="response-body">
-            <el-alert type="error" :closable="false" show-icon :title="response.error" />
-          </div>
-          <div v-else-if="response?.bodyPath" class="response-body">
-            <el-alert type="success" :closable="false" show-icon title="响应已保存到文件">
-              <div class="mono small">{{ response.bodyPath }}</div>
-            </el-alert>
-          </div>
-          <div v-else-if="response?.bodyText" class="response-body">
-            <div class="body-toolbar">
-              <SegmentedControl
-                v-if="canShowTree"
-                v-model="bodyView"
-                :options="[
-                  { label: '格式化', value: 'pretty' },
-                  { label: '树形', value: 'tree' }
-                ]"
-                size="small"
-              />
-              <span v-if="response.bodyTruncated" class="small warning-text">
-                响应内容过大，仅展示前 {{ formatBytes(MAX_DISPLAY_BYTES) }}
+        <el-progress
+          v-if="sending && progress > 0"
+          :percentage="progress"
+          :stroke-width="4"
+          :show-text="false"
+          class="send-progress"
+        />
+
+        <section class="panel request-panel">
+          <el-tabs v-model="requestTab" class="request-tabs">
+            <el-tab-pane name="params">
+              <template #label>
+                <span>参数</span>
+                <span class="tab-badge">{{ state.params.filter((row) => row.enabled && row.key).length }}</span>
+              </template>
+              <KeyValueEditor v-model="state.params" key-placeholder="参数名" value-placeholder="参数值" />
+            </el-tab-pane>
+
+            <el-tab-pane name="headers">
+              <template #label>
+                <span>请求头</span>
+                <span class="tab-badge">{{ state.headers.filter((row) => row.enabled && row.key).length }}</span>
+              </template>
+              <KeyValueEditor v-model="state.headers" key-placeholder="Header 名称" value-placeholder="Header 值" />
+            </el-tab-pane>
+
+            <el-tab-pane label="鉴权" name="auth">
+              <div class="auth-form">
+                <div class="form-row">
+                  <span class="form-label">鉴权方式</span>
+                  <el-select v-model="state.auth.type" style="width: 200px">
+                    <el-option v-for="item in AUTH_TYPES" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                </div>
+
+                <template v-if="state.auth.type === 'bearer'">
+                  <div class="form-row">
+                    <span class="form-label">Token</span>
+                    <el-input v-model="state.auth.token" placeholder="粘贴 Bearer Token" show-password />
+                  </div>
+                  <div class="small muted form-tip">发送时会自动附加请求头 Authorization: Bearer &lt;token&gt;</div>
+                </template>
+
+                <template v-else-if="state.auth.type === 'basic'">
+                  <div class="form-row">
+                    <span class="form-label">用户名</span>
+                    <el-input v-model="state.auth.username" placeholder="Username" />
+                  </div>
+                  <div class="form-row">
+                    <span class="form-label">密码</span>
+                    <el-input v-model="state.auth.password" type="password" show-password placeholder="Password" />
+                  </div>
+                </template>
+
+                <template v-else-if="state.auth.type === 'api-key'">
+                  <div class="form-row">
+                    <span class="form-label">参数名</span>
+                    <el-input v-model="state.auth.keyName" placeholder="例如 X-API-KEY" style="width: 260px" />
+                    <span class="form-label">参数值</span>
+                    <el-input v-model="state.auth.keyValue" placeholder="API Key" show-password style="width: 260px" />
+                  </div>
+                  <div class="form-row">
+                    <span class="form-label">添加位置</span>
+                    <SegmentedControl
+                      :model-value="state.auth.addTo"
+                      :options="[
+                        { label: '请求头', value: 'header' },
+                        { label: '查询参数', value: 'query' }
+                      ]"
+                      size="small"
+                      @update:model-value="(value) => (state.auth.addTo = value === 'query' ? 'query' : 'header')"
+                    />
+                  </div>
+                </template>
+
+                <div v-else class="small muted">当前请求不附加鉴权信息。</div>
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="请求体" name="body">
+              <div class="body-form">
+                <div class="form-row">
+                  <span class="form-label">类型</span>
+                  <el-select v-model="state.body.type" style="width: 200px">
+                    <el-option v-for="item in BODY_TYPES" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                  <template v-if="currentBodyType !== 'none'">
+                    <span class="form-label">Content-Type</span>
+                    <el-input
+                      v-model="state.body.contentType"
+                      placeholder="留空则自动推断"
+                      style="width: 280px"
+                    />
+                  </template>
+                </div>
+
+                <template v-if="showRawEditor">
+                  <el-input
+                    v-model="state.body.raw"
+                    type="textarea"
+                    :rows="7"
+                    resize="none"
+                    class="body-raw mono"
+                    :placeholder="
+                      state.body.type === 'json'
+                        ? '{&quot;name&quot;: &quot;devtoolbox&quot;}'
+                        : state.body.type === 'xml'
+                          ? '&lt;root&gt;&lt;/root&gt;'
+                          : '纯文本内容'
+                    "
+                  />
+                </template>
+
+                <template v-else-if="showFormEditor">
+                  <div v-if="state.body.form.length === 0" class="small muted">暂无字段</div>
+                  <div v-for="row in state.body.form" :key="row.id" class="form-data-row">
+                    <el-checkbox v-model="row.enabled" />
+                    <el-input v-model="row.key" size="small" placeholder="字段名" style="width: 220px" />
+                    <template v-if="row.kind === 'file'">
+                      <el-input :model-value="row.filePath" size="small" readonly placeholder="未选择文件" class="flex-1" />
+                      <el-button size="small" :icon="FolderOpened" @click="pickFormFile(row)">选择</el-button>
+                    </template>
+                    <el-input v-else v-model="row.value" size="small" placeholder="字段值" class="flex-1" />
+                    <el-button size="small" text @click="toggleFormKind(row)">
+                      {{ row.kind === 'file' ? '改为文本' : '改为文件' }}
+                    </el-button>
+                    <el-button size="small" text type="danger" @click="removeFormRow(row.id)">删除</el-button>
+                  </div>
+                  <el-button size="small" text type="primary" @click="addFormRow">+ 添加字段</el-button>
+                </template>
+
+                <template v-else-if="currentBodyType === 'binary'">
+                  <div class="form-row">
+                    <span class="form-label">文件</span>
+                    <el-input :model-value="state.body.filePath" readonly placeholder="选择要作为请求体的文件" class="flex-1" />
+                    <el-button :icon="FolderOpened" @click="pickBodyFile">选择文件</el-button>
+                  </div>
+                </template>
+
+                <div v-else class="small muted">该请求不携带请求体。</div>
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="选项" name="options">
+              <div class="options-form">
+                <div class="form-row">
+                  <span class="form-label">超时时间</span>
+                  <el-input-number
+                    v-model="state.options.timeoutMs"
+                    :min="1000"
+                    :max="600000"
+                    :step="1000"
+                    controls-position="right"
+                  />
+                  <span class="small muted">毫秒</span>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">跟随重定向</span>
+                  <el-switch v-model="state.options.followRedirects" />
+                  <span class="form-label" style="margin-left: 24px">忽略证书错误</span>
+                  <el-switch v-model="state.options.ignoreTlsErrors" />
+                </div>
+                <div class="form-row">
+                  <span class="form-label">响应处理</span>
+                  <SegmentedControl
+                    :model-value="state.options.responseMode"
+                    :options="RESPONSE_MODES"
+                    size="small"
+                    @update:model-value="(value) => (state.options.responseMode = value as ResponseMode)"
+                  />
+                  <span class="small muted">
+                    {{
+                      state.options.responseMode === 'file'
+                        ? '发送前选择保存路径，响应直接写入文件'
+                        : `响应内容最多展示 ${formatBytes(MAX_DISPLAY_BYTES)}`
+                    }}
+                  </span>
+                </div>
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+        </section>
+
+        <section class="panel response-panel">
+          <div class="panel-header response-head">
+            <span class="panel-title">响应</span>
+            <template v-if="response">
+              <span v-if="response.status" class="status-pill" :class="`is-${statusType}`">
+                {{ response.status }} {{ response.statusText }}
               </span>
-              <span class="spacer" />
-              <span class="small muted">{{ response.bodyText.length.toLocaleString() }} 字符</span>
-            </div>
-            <JsonTree
-              v-if="bodyView === 'tree' && canShowTree"
-              :data="prettyBody.data"
-              :expand-depth="2"
-              class="response-tree"
-            />
-            <pre v-else class="code-block response-code">{{ prettyBody.text }}</pre>
+              <span class="small muted">耗时 {{ formatDuration(response.durationMs) }}</span>
+              <span class="small muted">大小 {{ formatBytes(response.size) }}</span>
+              <span v-if="response.contentType" class="small muted type-text">{{ response.contentType }}</span>
+            </template>
+            <span class="spacer" />
+            <el-button
+              v-if="response?.bodyPath"
+              size="small"
+              :icon="FolderOpened"
+              @click="openSavedFile"
+            >
+              打开所在目录
+            </el-button>
+            <el-button
+              v-if="response?.bodyText"
+              size="small"
+              :icon="Download"
+              @click="saveResponseBody"
+            >
+              保存响应
+            </el-button>
+            <el-button
+              v-if="response?.bodyText"
+              size="small"
+              :icon="CopyDocument"
+              @click="copyResponseBody"
+            >
+              复制
+            </el-button>
           </div>
-          <div v-else class="placeholder-box">
-            <span>响应体为空</span>
-          </div>
-        </el-tab-pane>
 
-        <el-tab-pane label="响应头" name="headers">
-          <div class="response-body padded">
-            <div v-for="(header, index) in response?.headers ?? []" :key="index" class="header-row">
-              <span class="header-name mono">{{ header.name }}</span>
-              <span class="header-value mono">{{ header.value }}</span>
-            </div>
-          </div>
-        </el-tab-pane>
+          <el-tabs v-if="hasResponse" v-model="responseTab" class="response-tabs">
+            <el-tab-pane label="响应体" name="body">
+              <div v-if="response?.error" class="response-body">
+                <el-alert type="error" :closable="false" show-icon :title="response.error" />
+              </div>
+              <div v-else-if="response?.bodyPath" class="response-body">
+                <el-alert type="success" :closable="false" show-icon title="响应已保存到文件">
+                  <div class="mono small">{{ response.bodyPath }}</div>
+                </el-alert>
+              </div>
+              <div v-else-if="response?.bodyText" class="response-body">
+                <div class="body-toolbar">
+                  <SegmentedControl
+                    v-if="canShowTree"
+                    v-model="bodyView"
+                    :options="[
+                      { label: '格式化', value: 'pretty' },
+                      { label: '树形', value: 'tree' }
+                    ]"
+                    size="small"
+                  />
+                  <span v-if="response.bodyTruncated" class="small warning-text">
+                    响应内容过大，仅展示前 {{ formatBytes(MAX_DISPLAY_BYTES) }}
+                  </span>
+                  <span class="spacer" />
+                  <span class="small muted">{{ response.bodyText.length.toLocaleString() }} 字符</span>
+                </div>
+                <JsonTree
+                  v-if="bodyView === 'tree' && canShowTree"
+                  :data="prettyBody.data"
+                  :expand-depth="2"
+                  class="response-tree"
+                />
+                <pre v-else class="code-block response-code">{{ prettyBody.text }}</pre>
+              </div>
+              <div v-else class="placeholder-box">
+                <span>响应体为空</span>
+              </div>
+            </el-tab-pane>
 
-        <el-tab-pane label="请求详情" name="request">
-          <div class="response-body padded">
-            <div class="detail-row">
-              <span class="detail-label">请求方法</span>
-              <span class="mono">{{ sentRequest?.method }}</span>
-            </div>
-            <div class="detail-row">
-              <span class="detail-label">最终地址</span>
-              <span class="mono wrap">{{ response?.finalUrl || sentRequest?.url }}</span>
-            </div>
-            <div class="detail-label" style="margin-top: 10px">已配置的请求头</div>
-            <div v-for="row in (sentRequest?.headers ?? []).filter((item) => item.enabled && item.key)" :key="row.id" class="header-row">
-              <span class="header-name mono">{{ row.key }}</span>
-              <span class="header-value mono">{{ row.value }}</span>
-            </div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
+            <el-tab-pane label="响应头" name="headers">
+              <div class="response-body padded">
+                <div v-for="(header, index) in response?.headers ?? []" :key="index" class="header-row">
+                  <span class="header-name mono">{{ header.name }}</span>
+                  <span class="header-value mono">{{ header.value }}</span>
+                </div>
+              </div>
+            </el-tab-pane>
 
-      <div v-else class="placeholder-box response-empty">
-        <el-icon :size="28"><Promotion /></el-icon>
-        <span>填写地址后点击「发送」，响应会显示在这里</span>
+            <el-tab-pane label="请求详情" name="request">
+              <div class="response-body padded">
+                <div class="detail-row">
+                  <span class="detail-label">请求方法</span>
+                  <span class="mono">{{ sentRequest?.method }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">最终地址</span>
+                  <span class="mono wrap">{{ response?.finalUrl || sentRequest?.url }}</span>
+                </div>
+                <div class="detail-label" style="margin-top: 10px">已配置的请求头</div>
+                <div
+                  v-for="row in (sentRequest?.headers ?? []).filter((item) => item.enabled && item.key)"
+                  :key="row.id"
+                  class="header-row"
+                >
+                  <span class="header-name mono">{{ row.key }}</span>
+                  <span class="header-value mono">{{ row.value }}</span>
+                </div>
+              </div>
+            </el-tab-pane>
+          </el-tabs>
+
+          <div v-else class="placeholder-box response-empty">
+            <el-icon :size="28"><Promotion /></el-icon>
+            <span>填写地址后点击「发送」，响应会显示在这里</span>
+          </div>
+        </section>
       </div>
-    </section>
-
-    <ApiHistoryDrawer
-      v-model="historyOpen"
-      :entries="historyEntries"
-      @select="applyHistory"
-      @remove="removeHistoryEntry"
-      @clear="clearHistoryList"
-    />
+    </div>
   </div>
 </template>
 
@@ -745,16 +1317,94 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
   gap: 10px;
 }
 
-.history-count {
-  display: inline-block;
-  margin-left: 5px;
-  padding: 0 5px;
-  border-radius: 8px;
-  background: var(--app-primary-soft);
-  color: var(--app-primary);
+.project-bar {
+  gap: 8px;
+}
+
+.bar-label {
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+
+.project-select {
+  width: 200px;
+  flex: none;
+}
+
+.project-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.option-count {
+  flex: none;
   font-size: 11px;
-  line-height: 15px;
+  color: var(--app-text-3);
+}
+
+.project-summary {
+  white-space: nowrap;
+}
+
+/* 窗口较窄时先隐藏辅助说明，避免工具栏换行 */
+@media (max-width: 1180px) {
+  .project-summary {
+    display: none;
+  }
+}
+
+.save-badge {
+  flex: none;
+}
+
+.save-badge :deep(.el-badge__content.is-dot) {
+  width: 8px;
+  height: 8px;
+  border-width: 1px;
+  background: #ef4444;
+}
+
+.empty-main {
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--app-text-2);
+}
+
+.empty-icon {
+  color: var(--app-text-3);
+}
+
+.empty-title {
+  font-size: 14px;
   font-weight: 600;
+  color: var(--app-text);
+}
+
+.empty-desc {
+  max-width: 360px;
+  text-align: center;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+
+.api-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .url-bar {
@@ -784,13 +1434,48 @@ const showFormEditor = computed(() => ['form-urlencoded', 'form-data'].includes(
   flex: none;
 }
 
+.name-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-height: 26px;
+}
+
+.bar-label-inline {
+  flex: none;
+}
+
+.name-input {
+  width: 280px;
+  flex: none;
+}
+
+.save-state {
+  font-size: 11.5px;
+  color: var(--app-text-3);
+  white-space: nowrap;
+}
+
+.save-state.pending {
+  color: #d97706;
+}
+
+.save-state.failed {
+  color: #dc2626;
+}
+
+.request-info {
+  white-space: nowrap;
+}
+
 .send-progress {
   flex: none;
 }
 
 .request-panel {
   flex: none;
-  height: 288px;
+  height: clamp(196px, 34vh, 288px);
 }
 
 .request-tabs {

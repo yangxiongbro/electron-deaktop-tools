@@ -33,7 +33,7 @@ onMounted(async () => {
     const info = await window.api.app.info()
     version.value = info.version
   } catch {
-    version.value = '1.0.0'
+    version.value = '1.1.1'
   }
 
   window.__toolbox = {

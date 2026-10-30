@@ -198,34 +198,84 @@ export interface HttpProgress {
 }
 
 /* ------------------------------------------------------------------ */
-/* API 请求历史                                                        */
+/* API 请求：多项目 + 请求记录                                          */
 /* ------------------------------------------------------------------ */
 
-export interface ApiHistoryOptions {
+export interface ApiRequestOptions {
   timeoutMs: number
   followRedirects: boolean
   ignoreTlsErrors: boolean
   responseMode: ResponseMode
 }
 
-/** 一次请求的完整快照，保存下来可在「请求列表」中直接回填 */
-export interface ApiHistoryEntry {
+/** 一条请求记录：完整保存了发送该请求所需的全部信息 */
+export interface ApiRequestRecord {
   id: string
+  /** 请求名称，用于在左侧列表里区分同名接口 */
+  name: string
   method: HttpMethod
   url: string
   params: KeyValueRow[]
   headers: KeyValueRow[]
   auth: HttpAuthConfig
   body: HttpBodyConfig
-  options: ApiHistoryOptions
-  /** 最近一次发送的结果（仅用于展示） */
-  status?: number
-  ok?: boolean
-  durationMs?: number
+  options: ApiRequestOptions
+  /** 最近一次发送的结果（仅用于列表展示） */
+  lastStatus?: number
+  lastOk?: boolean
+  lastDurationMs?: number
+  lastSentAt?: number
   createdAt: number
+  updatedAt: number
 }
 
-export type ApiHistoryDraft = Omit<ApiHistoryEntry, 'id' | 'createdAt'>
+/** 渲染进程提交给主进程的保存草稿（id 为空表示新建） */
+export type ApiRequestDraft = Omit<ApiRequestRecord, 'createdAt' | 'updatedAt'> & {
+  createdAt?: number
+  updatedAt?: number
+}
+
+/** 一个项目下挂着自己的请求记录 */
+export interface ApiProject {
+  id: string
+  name: string
+  requests: ApiRequestRecord[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ApiProjectsState {
+  projects: ApiProject[]
+  /** 数据文件完整路径，界面可展示并一键打开所在目录 */
+  dataFile: string
+}
+
+export interface ApiRequestSaveResult {
+  projects: ApiProject[]
+  record: ApiRequestRecord
+}
+
+/** 一次发送的结果，用于回写请求记录 */
+export interface ApiAttemptResult {
+  status?: number
+  ok: boolean
+  durationMs: number
+}
+
+export interface ApiExportResult {
+  canceled: boolean
+  filePath?: string
+  requests?: number
+  error?: string
+}
+
+export interface ApiImportResult {
+  canceled: boolean
+  projects?: ApiProject[]
+  importedProjects?: number
+  importedRequests?: number
+  error?: string
+}
 
 /* ------------------------------------------------------------------ */
 /* 应用信息                                                            */
@@ -246,6 +296,8 @@ export interface AppInfo {
   configDir: string
   /** 配置文件完整路径 */
   settingsFile: string
+  /** API 请求数据文件完整路径（多项目 + 请求记录） */
+  apiDataFile: string
 }
 
 /* ------------------------------------------------------------------ */
@@ -276,11 +328,23 @@ export interface DesktopApi {
     abort(requestId: string): Promise<void>
     onProgress(cb: (p: HttpProgress) => void): () => void
   }
-  history: {
-    list(): Promise<ApiHistoryEntry[]>
-    add(entry: ApiHistoryDraft): Promise<ApiHistoryEntry[]>
-    remove(id: string): Promise<ApiHistoryEntry[]>
-    clear(): Promise<ApiHistoryEntry[]>
+  projects: {
+    /** 读取全部项目；数据文件不存在时会自动创建默认项目 */
+    load(): Promise<ApiProjectsState>
+    create(name: string): Promise<ApiProject[]>
+    rename(id: string, name: string): Promise<ApiProject[]>
+    remove(id: string): Promise<ApiProject[]>
+    /** 新建或更新一条请求记录（带 id 即更新） */
+    saveRequest(projectId: string, draft: ApiRequestDraft): Promise<ApiRequestSaveResult>
+    removeRequest(projectId: string, requestId: string): Promise<ApiProject[]>
+    /** 发送完成后把结果写回记录 */
+    recordResult(projectId: string, requestId: string, result: ApiAttemptResult): Promise<ApiProject[]>
+    /** 导出全部项目与请求到用户选择的文件，便于迁移到其他机器 */
+    exportAll(): Promise<ApiExportResult>
+    /** 从文件导入并与本地数据合并 */
+    importFile(): Promise<ApiImportResult>
+    /** 在文件管理器中定位数据文件 */
+    reveal(): Promise<void>
   }
   app: {
     info(): Promise<AppInfo>

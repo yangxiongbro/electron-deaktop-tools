@@ -1,0 +1,39 @@
+name: build-linux
+
+# Linux 产物（AppImage / deb）无法在 Windows 上直接构建：
+# AppImage 需要创建符号链接权限，deb 需要 Linux 上的 fpm。
+# 这里在 Ubuntu 上按项目里的 `npm run build:linux` 流程打包，产物可在 Actions 页面下载。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  linux:
+    name: Linux packages (x64 / arm64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Linux packages
+        run: npm run build:linux
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devtoolbox-linux
+          path: |
+            release/*/*.AppImage
+            release/*/*.deb
+          if-no-files-found: error

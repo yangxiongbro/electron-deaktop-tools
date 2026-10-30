@@ -4,6 +4,12 @@ import { join } from 'node:path'
 import type {
   AppInfo,
   AppSettings,
+  ApiExportResult,
+  ApiImportResult,
+  ApiProjectsState,
+  ApiRequestDraft,
+  ApiRequestSaveResult,
+  ApiAttemptResult,
   FilePickResult,
   JsonFileRequest,
   JsonFileResult,
@@ -14,9 +20,21 @@ import type {
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
-import { addHistory, clearHistory, loadHistory, removeHistory } from './history'
+import {
+  createProject,
+  dataFile as apiDataFile,
+  exportProjectsTo,
+  importProjectsFrom,
+  loadProjects,
+  projectsState,
+  recordResult,
+  removeProject,
+  removeRequest,
+  renameProject,
+  saveRequest
+} from './apiProjects'
 import { configDir, defaultDownloadDir, loadSettings, settingsFile, updateSettings } from './store'
-import type { ApiHistoryDraft, HttpRequestConfig } from '@shared/types'
+import type { HttpRequestConfig } from '@shared/types'
 
 const MAX_TEXT_FILE_BYTES = 32 * 1024 * 1024
 
@@ -170,15 +188,83 @@ export function registerIpcHandlers(): void {
     abortHttpRequest(requestId)
   })
 
-  /* ----------------------------- 请求历史 --------------------------- */
+  /* ----------------------------- 项目 / 请求记录 -------------------- */
 
-  ipcMain.handle('history:list', () => loadHistory())
+  ipcMain.handle('projects:load', (): Promise<ApiProjectsState> => projectsState())
 
-  ipcMain.handle('history:add', (_event, draft: ApiHistoryDraft) => addHistory(draft))
+  ipcMain.handle('projects:create', (_event, name: string) => createProject(name))
 
-  ipcMain.handle('history:remove', (_event, id: string) => removeHistory(id))
+  ipcMain.handle('projects:rename', (_event, id: string, name: string) => renameProject(id, name))
 
-  ipcMain.handle('history:clear', () => clearHistory())
+  ipcMain.handle('projects:remove', (_event, id: string) => removeProject(id))
+
+  ipcMain.handle(
+    'projects:save-request',
+    (_event, projectId: string, draft: ApiRequestDraft): Promise<ApiRequestSaveResult> =>
+      saveRequest(projectId, draft)
+  )
+
+  ipcMain.handle('projects:remove-request', (_event, projectId: string, requestId: string) =>
+    removeRequest(projectId, requestId)
+  )
+
+  ipcMain.handle(
+    'projects:record-result',
+    (_event, projectId: string, requestId: string, result: ApiAttemptResult) =>
+      recordResult(projectId, requestId, result)
+  )
+
+  ipcMain.handle('projects:export', async (event): Promise<ApiExportResult> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const settings = loadSettings()
+    const now = new Date()
+    const pad = (value: number): string => String(value).padStart(2, '0')
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `-${pad(now.getHours())}${pad(now.getMinutes())}`
+    const args = {
+      title: '导出全部请求数据',
+      defaultPath: join(settings.downloadDir, `devtoolbox-api-requests-${stamp}.json`),
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }]
+    }
+    const result = win ? await dialog.showSaveDialog(win, args) : await dialog.showSaveDialog(args)
+    if (result.canceled || !result.filePath) return { canceled: true }
+    try {
+      const summary = await exportProjectsTo(result.filePath)
+      return { canceled: false, filePath: result.filePath, requests: summary.requests }
+    } catch (error) {
+      return { canceled: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle('projects:import', async (event): Promise<ApiImportResult> => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const args = {
+      title: '导入请求数据',
+      defaultPath: loadSettings().downloadDir,
+      filters: [{ name: 'JSON 文件', extensions: ['json'] }],
+      properties: ['openFile' as const]
+    }
+    const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+    const filePath = assertAbsolutePath(result.filePaths[0], '导入文件路径')
+    try {
+      const summary = await importProjectsFrom(filePath)
+      return {
+        canceled: false,
+        projects: summary.projects,
+        importedProjects: summary.importedProjects,
+        importedRequests: summary.importedRequests
+      }
+    } catch (error) {
+      return { canceled: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle('projects:reveal', async () => {
+    await loadProjects()
+    shell.showItemInFolder(apiDataFile())
+  })
 
   /* ----------------------------- 应用信息 -------------------------- */
 
@@ -196,7 +282,8 @@ export function registerIpcHandlers(): void {
       userDataPath: app.getPath('userData'),
       defaultDownloadDir: defaultDownloadDir(),
       configDir: configDir(),
-      settingsFile: settingsFile()
+      settingsFile: settingsFile(),
+      apiDataFile: apiDataFile()
     }
   })
 

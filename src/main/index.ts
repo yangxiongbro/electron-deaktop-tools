@@ -13,6 +13,15 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_ID)
 }
 
+// 自动化截图时把用户数据目录指向临时目录，避免污染真实配置与请求数据
+if (process.env.DSH_SMOKE_DIR) {
+  try {
+    app.setPath('userData', join(process.env.DSH_SMOKE_DIR, 'user-data'))
+  } catch (error) {
+    console.error('[smoke] 设置临时用户数据目录失败', error)
+  }
+}
+
 function createWindow(): BrowserWindow {
   const settings = loadSettings()
   const smoke = Boolean(process.env.DSH_SMOKE_DIR)

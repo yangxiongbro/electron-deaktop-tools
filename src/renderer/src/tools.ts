@@ -47,7 +47,7 @@ export const TOOLS: ToolMeta[] = [
   {
     id: 'api',
     name: 'API 请求',
-    description: '发送 HTTP 请求，支持鉴权、请求头、form-data 上传与响应保存',
+    description: '按项目管理请求记录，支持鉴权、请求头、form-data 上传与响应保存',
     icon: Promotion,
     component: ApiClient
   },
