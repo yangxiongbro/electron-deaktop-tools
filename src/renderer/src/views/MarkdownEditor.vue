@@ -19,11 +19,13 @@ import {
   List,
   Minus,
   Picture,
+  Reading,
   Tickets,
   View
 } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
+import MarkdownSyntaxDialog from '../components/MarkdownSyntaxDialog.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
 import { copyText } from '../utils/clipboard'
 
@@ -105,6 +107,8 @@ const currentPath = ref('')
 const syncScroll = ref(true)
 /** 工具栏（插入菜单）是否折叠，给编辑区腾出更多空间 */
 const toolbarCollapsed = ref(false)
+/** Markdown 语法速查弹窗 */
+const syntaxVisible = ref(false)
 const editorRef = ref<HTMLTextAreaElement | null>(null)
 const previewRef = ref<HTMLElement | null>(null)
 
@@ -333,6 +337,19 @@ async function copyMarkdown(): Promise<void> {
   else ElMessage.error('复制失败')
 }
 
+/** 从语法弹窗插入片段：单行直接插到光标处，多行按块插入 */
+function insertSyntax(snippet: string): void {
+  if (snippet.includes('\n')) {
+    insertBlock(snippet)
+    return
+  }
+  const el = editorRef.value
+  if (!el) return
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  replaceRange(start, end, snippet, start + snippet.length, start + snippet.length)
+}
+
 async function openFile(): Promise<void> {
   const pick = await window.api.dialog.openFile({
     title: '打开 Markdown 文件',
@@ -523,6 +540,7 @@ function handleTab(event: KeyboardEvent): void {
         </el-dropdown>
 
         <div class="spacer" />
+        <el-button size="small" text :icon="Reading" @click="syntaxVisible = true">语法</el-button>
         <el-button size="small" text :icon="CopyDocument" @click="copyMarkdown">复制</el-button>
         <el-button size="small" text @click="clearDocument">清空</el-button>
       </template>
@@ -648,6 +666,8 @@ function handleTab(event: KeyboardEvent): void {
       <span class="spacer" />
       <span class="mono">{{ currentPath || '尚未保存到文件' }}</span>
     </div>
+
+    <MarkdownSyntaxDialog v-model="syntaxVisible" @insert="insertSyntax" />
   </div>
 </template>
 

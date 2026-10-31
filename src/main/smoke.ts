@@ -13,7 +13,7 @@ export function setupSmokeCapture(win: BrowserWindow): void {
   const outputDir = process.env.DSH_SMOKE_DIR
   if (!outputDir) return
 
-  const tools = ['json', 'naming', 'codec', 'api', 'markdown', 'settings']
+  const tools = ['json', 'naming', 'codec', 'api', 'markdown', 'cron', 'settings']
 
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -75,6 +75,25 @@ export function setupSmokeCapture(win: BrowserWindow): void {
           if (tool === 'api') await seedApiRequest()
           await capture(`${tool}.png`)
         }
+
+        // 语法弹窗：Markdown 与 Cron 各截一张
+        const openSyntaxDialog = async (tool: string, file: string): Promise<void> => {
+          await runScript(`window.__toolbox && window.__toolbox.setTool(${JSON.stringify(tool)})`)
+          await wait(700)
+          await runScript(`(() => {
+            const target = Array.from(document.querySelectorAll('button')).find(
+              (item) => (item.textContent || '').replace(/\\s+/g, '') === '语法'
+            )
+            if (target) target.click()
+            return Boolean(target)
+          })()`)
+          await wait(700)
+          await capture(file)
+          await runScript(`document.querySelector('.el-dialog__footer button')?.click()`)
+          await wait(400)
+        }
+        await openSyntaxDialog('markdown', 'markdown-syntax.png')
+        await openSyntaxDialog('cron', 'cron-syntax.png')
 
         // 多项目：展开项目下拉，展示「按项目管理请求」的能力
         await runScript(`window.__toolbox && window.__toolbox.setTool('api')`)

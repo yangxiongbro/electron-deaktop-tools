@@ -8,6 +8,7 @@ import {
   FolderOpened,
   MagicStick,
   Minus,
+  RefreshLeft,
   Upload
 } from '@element-plus/icons-vue'
 import type { JsonErrorInfo } from '@shared/jsonValidate'
@@ -16,7 +17,7 @@ import type { FilePickResult, JsonFileOk, JsonFileFail } from '@shared/types'
 import JsonTree from '../components/JsonTree.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
 import { copyText } from '../utils/clipboard'
-import { formatBytes, formatDuration } from '../utils/format'
+import { formatBytes, formatDuration, unescapeText } from '../utils/format'
 
 const VIEW_OPTIONS = [
   { label: '树形', value: 'tree' },
@@ -32,6 +33,9 @@ const indent = ref<'2' | '4' | 'tab'>('2')
 const autoFormat = ref(true)
 
 const TEXT_RENDER_LIMIT = 300_000
+
+/** 「去除转义」按钮的悬浮提示（转义字符放在脚本里，避免模板里的反斜杠被当成字符串转义） */
+const removeEscapeTip = '把 \\" \\n \\t \\uXXXX 这类转义还原成真实字符，常用于处理被二次转义的 JSON'
 
 const renderedText = computed(() =>
   outputText.value.length > TEXT_RENDER_LIMIT ? outputText.value.slice(0, TEXT_RENDER_LIMIT) : outputText.value
@@ -99,6 +103,24 @@ function reformat(): void {
   if (parsed.value !== undefined) {
     outputText.value = JSON.stringify(parsed.value, null, indentUnit(indent.value))
   }
+}
+
+/**
+ * 去除转义：把 `\"`、`\\`、`\n`、`\uXXXX` 这类转义还原成真实字符，
+ * 常用于处理被二次转义（例如从日志、代码字符串里复制出来）的 JSON。
+ */
+function removeEscapes(): void {
+  const source = input.value
+  if (!source.trim()) return
+  const unescaped = unescapeText(source)
+  if (unescaped === source) {
+    ElMessage.info('没有需要去除的转义字符')
+    return
+  }
+  input.value = unescaped
+  format()
+  if (error.value) ElMessage.warning('已去除转义，但结果不是合法 JSON，请检查内容')
+  else ElMessage.success('已去除转义字符')
 }
 
 function clearAll(): void {
@@ -244,6 +266,9 @@ watch(indent, reformat)
     <div class="page-toolbar">
       <el-button type="primary" :icon="MagicStick" @click="format">格式化</el-button>
       <el-button :icon="Minus" @click="minify">压缩</el-button>
+      <el-tooltip :content="removeEscapeTip" placement="bottom" :show-after="200">
+        <el-button :icon="RefreshLeft" @click="removeEscapes">去除转义</el-button>
+      </el-tooltip>
       <el-button :icon="CopyDocument" :disabled="!outputText" @click="copyOutput">复制结果</el-button>
       <el-button :icon="Delete" @click="clearAll">一键清空</el-button>
 

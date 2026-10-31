@@ -5,6 +5,7 @@ import {
   Key,
   Promotion,
   EditPen,
+  Timer,
   Setting
 } from '@element-plus/icons-vue'
 import JsonFormatter from './views/JsonFormatter.vue'
@@ -12,6 +13,7 @@ import NamingConverter from './views/NamingConverter.vue'
 import CodecTool from './views/CodecTool.vue'
 import ApiClient from './views/ApiClient.vue'
 import MarkdownEditor from './views/MarkdownEditor.vue'
+import CronGenerator from './views/CronGenerator.vue'
 import SettingsView from './views/SettingsView.vue'
 
 export interface ToolMeta {
@@ -54,9 +56,16 @@ export const TOOLS: ToolMeta[] = [
   {
     id: 'markdown',
     name: 'Markdown 编辑器',
-    description: '编辑与预览 Markdown，支持标题、代码块等快捷插入',
+    description: '编辑与预览 Markdown，支持标题、代码块等快捷插入与语法速查',
     icon: EditPen,
     component: MarkdownEditor
+  },
+  {
+    id: 'cron',
+    name: 'Cron 生成器',
+    description: '按字段选择时间生成 Quartz / Spring / Linux / Node 表达式，并推算最近运行时间',
+    icon: Timer,
+    component: CronGenerator
   },
   {
     id: 'settings',
