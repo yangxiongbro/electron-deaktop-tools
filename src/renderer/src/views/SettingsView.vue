@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Moon, Sunny } from '@element-plus/icons-vue'
-import type { AppInfo, ThemeMode } from '@shared/types'
+import type { AppInfo, ChatState, ThemeMode } from '@shared/types'
 import {
   setApiAutoSave,
   setDownloadDir,
@@ -13,6 +13,8 @@ import {
 
 const { settings } = useSettings()
 const info = ref<AppInfo | null>(null)
+const chatState = ref<ChatState | null>(null)
+const chatPort = ref('')
 
 async function chooseDir(): Promise<void> {
   const result = await window.api.settings.chooseDownloadDir()
@@ -51,7 +53,56 @@ onMounted(async () => {
   } catch {
     info.value = null
   }
+  try {
+    chatState.value = await window.api.chat.state()
+    chatPort.value = String(chatState.value.me.port)
+  } catch {
+    chatState.value = null
+  }
 })
+
+async function refreshChatState(): Promise<void> {
+  try {
+    chatState.value = await window.api.chat.state()
+    chatPort.value = String(chatState.value.me.port)
+  } catch {
+    chatState.value = null
+  }
+}
+
+async function saveChatPort(): Promise<void> {
+  const port = Number(chatPort.value)
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    ElMessage.warning('端口需要在 1024 ~ 65535 之间')
+    return
+  }
+  try {
+    chatState.value = await window.api.chat.updateProfile({ port })
+    if (chatState.value.portError) ElMessage.error(chatState.value.portError)
+    else ElMessage.success(`聊天端口已改为 ${port}`)
+  } catch (error) {
+    ElMessage.error(`修改端口失败：${(error as Error).message}`)
+  }
+}
+
+async function chooseChatDir(): Promise<void> {
+  try {
+    const result = await window.api.chat.chooseChatDir()
+    if (result.canceled) return
+    await refreshChatState()
+    ElMessage.success('聊天文件目录已更新')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function openChatDir(): Promise<void> {
+  try {
+    await window.api.chat.openChatDir()
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
 </script>
 
 <template>
@@ -124,11 +175,48 @@ onMounted(async () => {
       </section>
 
       <section class="card">
+        <div class="card-title">本地聊天</div>
+        <div class="card-desc muted small">
+          程序启动时会在这个端口上监听，好友通过「IP + 端口」找到你；聊天中收到的图片与文件保存到下面的目录。
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="row-title">聊天端口</div>
+            <div class="row-desc muted small">
+              建议使用 1024 ~ 65535 之间不常用的端口（默认 45871）。修改后会广播给在线好友，并在下次启动时生效。
+            </div>
+          </div>
+          <div class="port-row">
+            <el-input v-model="chatPort" style="width: 120px" placeholder="45871" @keydown.enter="saveChatPort">
+              <template #append>
+                <el-button @click="saveChatPort">保存</el-button>
+              </template>
+            </el-input>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="row-title">聊天文件目录</div>
+            <div class="row-desc muted small">聊天里发送 / 接收的图片与文件会复制到该目录。</div>
+          </div>
+          <div class="dir-row chat-dir-row">
+            <el-input :model-value="chatState?.chatDir ?? ''" readonly />
+            <el-button :icon="FolderOpened" @click="chooseChatDir">选择目录</el-button>
+            <el-button :icon="FolderOpened" @click="openChatDir">打开</el-button>
+          </div>
+        </div>
+        <div class="small muted chat-status">
+          <template v-if="chatState?.listening">正在监听端口 {{ chatState?.me.port }}，本机地址 {{ chatState?.me.host }}</template>
+          <template v-else>{{ chatState?.portError || '尚未启动聊天服务' }}</template>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-title">关于</div>
         <div class="about-grid">
           <div class="about-item">
             <span class="about-label">应用版本</span>
-            <span class="about-value mono">v{{ info?.version ?? '1.1.3' }}</span>
+            <span class="about-value mono">v{{ info?.version ?? '-' }}</span>
           </div>
           <div class="about-item">
             <span class="about-label">Electron</span>
@@ -153,6 +241,10 @@ onMounted(async () => {
           <div class="about-item">
             <span class="about-label">请求数据文件</span>
             <span class="about-value mono wrap">{{ info?.apiDataFile ?? '-' }}</span>
+          </div>
+          <div class="about-item">
+            <span class="about-label">聊天数据文件</span>
+            <span class="about-value mono wrap">{{ info?.chatDataFile ?? '-' }}</span>
           </div>
         </div>
 
@@ -324,6 +416,18 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   margin-top: 8px;
+}
+
+.chat-dir-row {
+  flex: 1;
+  max-width: 640px;
+  justify-content: flex-end;
+}
+
+.chat-status {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--app-border);
 }
 
 .about-grid {

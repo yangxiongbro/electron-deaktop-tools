@@ -1,5 +1,6 @@
 import type { Component } from 'vue'
 import {
+  ChatDotRound,
   DataLine,
   Switch,
   Key,
@@ -14,6 +15,7 @@ import CodecTool from './views/CodecTool.vue'
 import ApiClient from './views/ApiClient.vue'
 import MarkdownEditor from './views/MarkdownEditor.vue'
 import CronGenerator from './views/CronGenerator.vue'
+import LocalChat from './views/LocalChat.vue'
 import SettingsView from './views/SettingsView.vue'
 
 export interface ToolMeta {
@@ -66,6 +68,13 @@ export const TOOLS: ToolMeta[] = [
     description: '按字段选择时间生成 Quartz / Spring / Linux / Node 表达式，并推算最近运行时间',
     icon: Timer,
     component: CronGenerator
+  },
+  {
+    id: 'chat',
+    name: '本地聊天',
+    description: '局域网内点对点聊天，支持文字、图片、文件、表情与聊天记录搜索',
+    icon: ChatDotRound,
+    component: LocalChat
   },
   {
     id: 'settings',

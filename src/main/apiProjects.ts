@@ -2,6 +2,7 @@ import { promises as fsp } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
   ApiAttemptResult,
+  ApiFolder,
   ApiProject,
   ApiRequestDraft,
   ApiRequestOptions,
@@ -17,17 +18,18 @@ import type {
 import { configDir } from './store'
 
 /**
- * API 请求数据（多项目 + 请求记录）的本地持久化。
+ * API 请求数据（多项目 + 请求记录 + 文件夹）的本地持久化。
  *
  * 设计目标：所有请求记录都写进一个可读的 JSON 文件（默认与 settings.json 同目录），
  * 既能在重启后恢复，也能直接拷贝 / 导出到另一台机器继续使用。
  */
 
-/** 数据结构版本，后续调整结构时可据此做迁移 */
-const STORE_VERSION = 2
+/** 数据结构版本，后续调整结构时可据此做迁移（3：新增文件夹） */
+const STORE_VERSION = 3
 
 const MAX_PROJECTS = 50
 const MAX_REQUESTS_PER_PROJECT = 500
+const MAX_FOLDERS_PER_PROJECT = 200
 const MAX_ROWS = 300
 
 const DEFAULT_PROJECT_NAME = '默认项目'
@@ -107,6 +109,10 @@ function newRowId(): string {
   return `k-${randomSuffix()}`
 }
 
+function newFolderId(): string {
+  return `f-${randomSuffix()}`
+}
+
 /** 请求名称为空时，用地址生成一个可读名称 */
 export function deriveNameFromUrl(url: string): string {
   const trimmed = url.trim()
@@ -123,6 +129,10 @@ export function deriveNameFromUrl(url: string): string {
 
 function normalizeProjectName(value: unknown): string {
   return str(value).replace(/\s+/g, ' ').trim().slice(0, 60)
+}
+
+function normalizeFolderName(value: unknown): string {
+  return str(value).replace(/\s+/g, ' ').trim().slice(0, 40)
 }
 
 function uniqueProjectName(projects: ApiProject[], base: string): string {
@@ -228,6 +238,7 @@ function normalizeRecord(value: unknown, fallbackName: string, now: number): Api
     auth: normalizeAuth(value.auth),
     body: normalizeBody(value.body),
     options: normalizeOptions(value.options),
+    folderId: str(value.folderId) || null,
     lastStatus: optionalNumber(value.lastStatus),
     lastOk: typeof value.lastOk === 'boolean' ? value.lastOk : undefined,
     lastDurationMs: optionalNumber(value.lastDurationMs),
@@ -237,17 +248,52 @@ function normalizeRecord(value: unknown, fallbackName: string, now: number): Api
   }
 }
 
+function normalizeFolder(value: unknown, now: number): ApiFolder | null {
+  if (!isObject(value)) return null
+  const name = normalizeFolderName(value.name)
+  if (!name) return null
+  return {
+    id: str(value.id) || newFolderId(),
+    name,
+    parentId: str(value.parentId) || null,
+    createdAt: num(value.createdAt, now),
+    updatedAt: num(value.updatedAt, now)
+  }
+}
+
 function normalizeProject(value: unknown, index: number, now: number): ApiProject | null {
   if (!isObject(value)) return null
+
+  const folders = Array.isArray(value.folders)
+    ? dedupeFolders(
+        value.folders
+          .map((item) => normalizeFolder(item, now))
+          .filter((item): item is ApiFolder => item !== null)
+      ).slice(0, MAX_FOLDERS_PER_PROJECT)
+    : []
+  const folderIds = new Set(folders.map((item) => item.id))
+  // 上级文件夹不存在的挂到根目录，避免出现孤儿节点
+  for (const folder of folders) {
+    if (folder.parentId && (!folderIds.has(folder.parentId) || folder.parentId === folder.id)) {
+      folder.parentId = null
+    }
+  }
+
   const requests = Array.isArray(value.requests)
     ? value.requests
         .map((item, itemIndex) => normalizeRecord(item, `请求 ${itemIndex + 1}`, now))
         .filter((item): item is ApiRequestRecord => item !== null)
     : []
+  // 指向已删除文件夹的请求回落到根目录
+  for (const record of requests) {
+    if (record.folderId && !folderIds.has(record.folderId)) record.folderId = null
+  }
+
   return {
     id: str(value.id) || newProjectId(),
     name: normalizeProjectName(value.name) || `项目 ${index + 1}`,
     requests: dedupeById(requests).slice(0, MAX_REQUESTS_PER_PROJECT),
+    folders,
     createdAt: num(value.createdAt, now),
     updatedAt: num(value.updatedAt, now)
   }
@@ -280,6 +326,17 @@ function dedupeById(records: ApiRequestRecord[]): ApiRequestRecord[] {
   return result
 }
 
+function dedupeFolders(folders: ApiFolder[]): ApiFolder[] {
+  const seen = new Set<string>()
+  const result: ApiFolder[] = []
+  for (const folder of folders) {
+    if (seen.has(folder.id)) continue
+    seen.add(folder.id)
+    result.push(folder)
+  }
+  return result
+}
+
 function normalizeDraft(draft: ApiRequestDraft, now: number): ApiRequestRecord {
   const raw = (draft ?? {}) as Partial<ApiRequestRecord>
   const url = str(raw.url)
@@ -293,6 +350,7 @@ function normalizeDraft(draft: ApiRequestDraft, now: number): ApiRequestRecord {
     auth: normalizeAuth(raw.auth),
     body: normalizeBody(raw.body),
     options: normalizeOptions(raw.options),
+    folderId: str(raw.folderId) || null,
     lastStatus: optionalNumber(raw.lastStatus),
     lastOk: typeof raw.lastOk === 'boolean' ? raw.lastOk : undefined,
     lastDurationMs: optionalNumber(raw.lastDurationMs),
@@ -338,6 +396,7 @@ function buildDefaultProject(now = Date.now()): ApiProject {
     id: newProjectId(),
     name: DEFAULT_PROJECT_NAME,
     requests: [],
+    folders: [],
     createdAt: now,
     updatedAt: now
   }
@@ -364,6 +423,7 @@ function parseProjectsFile(text: string): ApiProject[] {
             id: newProjectId(),
             name: DEFAULT_PROJECT_NAME,
             requests: dedupeById(requests).slice(0, MAX_REQUESTS_PER_PROJECT),
+            folders: [],
             createdAt: now,
             updatedAt: now
           }
@@ -477,6 +537,7 @@ export async function createProject(name: string): Promise<ApiProject[]> {
     id: newProjectId(),
     name: uniqueProjectName(projects, normalizeProjectName(name) || `项目 ${projects.length + 1}`),
     requests: [],
+    folders: [],
     createdAt: now,
     updatedAt: now
   }
@@ -523,6 +584,10 @@ export async function saveRequest(
 
   const now = Date.now()
   const normalized = normalizeDraft(draft, now)
+  // 目标文件夹可能已被删除，回落到根目录
+  if (normalized.folderId && !project.folders.some((item) => item.id === normalized.folderId)) {
+    normalized.folderId = null
+  }
   const index = normalized.id
     ? project.requests.findIndex((item) => item.id === normalized.id)
     : -1
@@ -562,6 +627,110 @@ export async function removeRequest(projectId: string, requestId: string): Promi
   const next = project.requests.filter((item) => item.id !== requestId)
   project.requests.splice(0, project.requests.length, ...next)
   project.updatedAt = Date.now()
+  await persist(projects)
+  return projects
+}
+
+/* ------------------------------------------------------------------ */
+/* 文件夹维护                                                          */
+/* ------------------------------------------------------------------ */
+
+function requireFolder(project: ApiProject, folderId: string): ApiFolder {
+  const folder = project.folders.find((item) => item.id === folderId)
+  if (!folder) throw new Error('文件夹不存在或已被删除')
+  return folder
+}
+
+export async function createFolder(
+  projectId: string,
+  name: string,
+  parentId: string | null
+): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  if (project.folders.length >= MAX_FOLDERS_PER_PROJECT) {
+    throw new Error(`每个项目最多创建 ${MAX_FOLDERS_PER_PROJECT} 个文件夹`)
+  }
+
+  const folderName = normalizeFolderName(name)
+  if (!folderName) throw new Error('文件夹名称不能为空')
+
+  const parent = parentId ? requireFolder(project, parentId) : null
+  const parentKey = parent?.id ?? null
+  if (project.folders.some((item) => item.parentId === parentKey && item.name === folderName)) {
+    throw new Error(`当前层级已存在名为「${folderName}」的文件夹`)
+  }
+
+  const now = Date.now()
+  project.folders.push({
+    id: newFolderId(),
+    name: folderName,
+    parentId: parentKey,
+    createdAt: now,
+    updatedAt: now
+  })
+  project.updatedAt = now
+  await persist(projects)
+  return projects
+}
+
+export async function renameFolder(projectId: string, folderId: string, name: string): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  const folder = requireFolder(project, folderId)
+
+  const folderName = normalizeFolderName(name)
+  if (!folderName) throw new Error('文件夹名称不能为空')
+  if (project.folders.some((item) => item.id !== folderId && item.parentId === folder.parentId && item.name === folderName)) {
+    throw new Error(`当前层级已存在名为「${folderName}」的文件夹`)
+  }
+
+  folder.name = folderName
+  folder.updatedAt = Date.now()
+  project.updatedAt = folder.updatedAt
+  await persist(projects)
+  return projects
+}
+
+/** 删除文件夹时，连同它的子文件夹与这些文件夹里的请求一起删除 */
+export async function removeFolder(projectId: string, folderId: string): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  requireFolder(project, folderId)
+
+  const doomed = new Set<string>([folderId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const folder of project.folders) {
+      if (folder.parentId && doomed.has(folder.parentId) && !doomed.has(folder.id)) {
+        doomed.add(folder.id)
+        changed = true
+      }
+    }
+  }
+
+  project.folders = project.folders.filter((item) => !doomed.has(item.id))
+  project.requests = project.requests.filter((item) => !item.folderId || !doomed.has(item.folderId))
+  project.updatedAt = Date.now()
+  await persist(projects)
+  return projects
+}
+
+export async function moveRequest(
+  projectId: string,
+  requestId: string,
+  folderId: string | null
+): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  const record = project.requests.find((item) => item.id === requestId)
+  if (!record) throw new Error('请求不存在或已被删除')
+
+  if (folderId) requireFolder(project, folderId)
+  record.folderId = folderId || null
+  record.updatedAt = Date.now()
+  project.updatedAt = record.updatedAt
   await persist(projects)
   return projects
 }
@@ -618,6 +787,34 @@ export async function importProjectsFrom(
 }
 
 /** 导入采用「合并」策略：同一项目（id 或名称相同）追加缺失的请求，避免覆盖本地数据 */
+/** 把来源项目的文件夹并入目标项目，返回「旧 id → 新 id」的映射 */
+function mergeFolders(target: ApiProject, source: ApiProject): Map<string, string> {
+  const remap = new Map<string, string>()
+  const existing = new Map(target.folders.map((item) => [item.id, item]))
+
+  for (const folder of source.folders) {
+    if (existing.has(folder.id)) {
+      remap.set(folder.id, folder.id)
+      continue
+    }
+    const copy: ApiFolder = {
+      ...folder,
+      parentId: folder.parentId ? (remap.get(folder.parentId) ?? folder.parentId) : null
+    }
+    target.folders.push(copy)
+    existing.set(copy.id, copy)
+    remap.set(folder.id, copy.id)
+  }
+
+  // 父级可能比子级后合并，这里再回填一次
+  for (const folder of target.folders) {
+    if (folder.parentId && remap.has(folder.parentId)) {
+      folder.parentId = remap.get(folder.parentId) ?? null
+    }
+  }
+  return remap
+}
+
 function mergeProjects(
   projects: ApiProject[],
   incoming: ApiProject[]
@@ -635,6 +832,7 @@ function mergeProjects(
         id: projects.some((item) => item.id === source.id) ? newProjectId() : source.id || newProjectId(),
         name: uniqueProjectName(projects, source.name),
         requests: [],
+        folders: [],
         updatedAt: now
       }
       projects.push(project)
@@ -642,10 +840,14 @@ function mergeProjects(
       projectCount += 1
     }
 
+    const folderRemap = mergeFolders(target, source)
     const existingIds = new Set(target.requests.map((item) => item.id))
     for (const request of source.requests) {
       if (existingIds.has(request.id)) continue
-      const copy: ApiRequestRecord = request.id ? request : { ...request, id: newRequestId() }
+      const copy: ApiRequestRecord = {
+        ...(request.id ? request : { ...request, id: newRequestId() }),
+        folderId: request.folderId ? (folderRemap.get(request.folderId) ?? null) : null
+      }
       target.requests.unshift(copy)
       existingIds.add(copy.id)
       requestCount += 1

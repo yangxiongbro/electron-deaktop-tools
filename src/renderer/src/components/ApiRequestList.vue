@@ -1,12 +1,44 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { CopyDocument, Delete, Expand, Fold, FolderOpened, Search } from '@element-plus/icons-vue'
-import type { ApiRequestRecord } from '@shared/types'
-import { formatDuration } from '../utils/format'
+import {
+  ArrowDown,
+  CopyDocument,
+  Delete,
+  DocumentAdd,
+  EditPen,
+  Expand,
+  Fold,
+  FolderAdd,
+  FolderOpened,
+  MoreFilled,
+  Search
+} from '@element-plus/icons-vue'
+import type { ApiFolder, ApiRequestRecord } from '@shared/types'
+
+interface FolderRow {
+  type: 'folder'
+  id: string
+  depth: number
+  folder: ApiFolder
+  /** 文件夹下（含子文件夹）的请求数 */
+  count: number
+  expanded: boolean
+}
+
+interface RequestRow {
+  type: 'request'
+  id: string
+  depth: number
+  record: ApiRequestRecord
+}
+
+type ApiListRow = FolderRow | RequestRow
 
 const props = defineProps<{
-  /** 当前项目下的请求记录，最新的在最前 */
+  /** 当前项目下的请求记录 */
   requests: ApiRequestRecord[]
+  /** 当前项目下的文件夹 */
+  folders: ApiFolder[]
   /** 当前选中的请求 id */
   currentId: string
   /** 有未保存修改的请求 id */
@@ -21,22 +53,19 @@ const emit = defineEmits<{
   (event: 'select', id: string): void
   (event: 'duplicate', id: string): void
   (event: 'remove', id: string): void
+  (event: 'create-request', folderId: string | null): void
+  (event: 'create-folder', parentId: string | null): void
+  (event: 'rename-folder', id: string): void
+  (event: 'remove-folder', id: string): void
+  (event: 'move', id: string): void
   (event: 'reveal'): void
   (event: 'toggle'): void
 }>()
 
 const query = ref('')
 
-const filtered = computed(() => {
-  const keyword = query.value.trim().toLowerCase()
-  if (!keyword) return props.requests
-  return props.requests.filter(
-    (item) =>
-      item.name.toLowerCase().includes(keyword) ||
-      item.url.toLowerCase().includes(keyword) ||
-      item.method.toLowerCase().includes(keyword)
-  )
-})
+/** 被折叠的文件夹 id；不在列表里就是展开的（新加的文件夹默认展开） */
+const collapsedIds = ref<string[]>([])
 
 const dataFileName = computed(() => props.dataFile.split(/[\\/]/).pop() || 'api-projects.json')
 
@@ -68,7 +97,9 @@ function methodShort(method: string): string {
   return map[method] ?? method.slice(0, 1)
 }
 
-function statusClass(status?: number): string {
+function statusClass(record: ApiRequestRecord): string {
+  if (record.lastOk === false) return 'danger'
+  const status = record.lastStatus ?? 0
   if (!status) return 'unknown'
   if (status < 300) return 'success'
   if (status < 400) return 'info'
@@ -76,19 +107,151 @@ function statusClass(status?: number): string {
   return 'danger'
 }
 
-function paramCount(record: ApiRequestRecord): number {
-  return record.params.filter((row) => row.enabled && row.key).length
+/** 列表里只展示「请求结果」：状态码，没发过就显示 — */
+function statusText(record: ApiRequestRecord): string {
+  if (record.lastStatus) return String(record.lastStatus)
+  if (record.lastOk === false) return '失败'
+  return '—'
 }
 
-function formatTime(timestamp: number): string {
-  if (!timestamp) return '-'
-  const diff = Date.now() - timestamp
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
-  const date = new Date(timestamp)
-  return `${date.getMonth() + 1}-${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+const keyword = computed(() => query.value.trim().toLowerCase())
+
+function matches(record: ApiRequestRecord): boolean {
+  if (!keyword.value) return true
+  return (
+    record.name.toLowerCase().includes(keyword.value) ||
+    record.url.toLowerCase().includes(keyword.value) ||
+    record.method.toLowerCase().includes(keyword.value)
+  )
+}
+
+const childrenOf = (parentId: string | null): ApiFolder[] =>
+  props.folders.filter((item) => (item.parentId ?? null) === parentId).sort((a, b) => a.createdAt - b.createdAt)
+
+/** 文件夹下的请求（含所有子文件夹），用于显示数量与级联搜索 */
+function collectRequests(folderId: string): ApiRequestRecord[] {
+  const direct = props.requests.filter((item) => item.folderId === folderId)
+  const children = childrenOf(folderId)
+  return [...direct, ...children.flatMap((child) => collectRequests(child.id))]
+}
+
+const folderCounts = computed<Record<string, number>>(() => {
+  const map: Record<string, number> = {}
+  for (const folder of props.folders) map[folder.id] = collectRequests(folder.id).length
+  return map
+})
+
+/**
+ * 把「文件夹 + 请求」摊平成可渲染的行。
+ * 搜索时只保留命中的请求与其祖先文件夹，并自动展开。
+ */
+const rows = computed<ApiListRow[]>(() => {
+  const result: ApiListRow[] = []
+  const requestsOf = (folderId: string | null): ApiRequestRecord[] =>
+    props.requests
+      .filter((item) => (item.folderId ?? null) === folderId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+
+  const searchActive = Boolean(keyword.value)
+
+  const walk = (parentId: string | null, depth: number): void => {
+    for (const folder of childrenOf(parentId)) {
+      if (searchActive && collectRequests(folder.id).filter(matches).length === 0) continue
+      const expanded = searchActive || !collapsedIds.value.includes(folder.id)
+      result.push({
+        type: 'folder',
+        id: folder.id,
+        depth,
+        folder,
+        count: folderCounts.value[folder.id] ?? 0,
+        expanded
+      })
+      if (expanded) walk(folder.id, depth + 1)
+    }
+    for (const record of requestsOf(parentId)) {
+      if (!matches(record)) continue
+      result.push({ type: 'request', id: record.id, depth, record })
+    }
+  }
+  walk(null, 0)
+  return result
+})
+
+const hasContent = computed(() => props.requests.length > 0 || props.folders.length > 0)
+
+function toggleFolder(id: string): void {
+  const set = new Set(collapsedIds.value)
+  if (set.has(id)) set.delete(id)
+  else set.add(id)
+  collapsedIds.value = [...set]
+}
+
+function expandAll(): void {
+  collapsedIds.value = []
+}
+
+function collapseAll(): void {
+  collapsedIds.value = props.folders.map((item) => item.id)
+}
+
+function onRowClick(row: ApiListRow): void {
+  if (row.type === 'folder') toggleFolder(row.id)
+  else emit('select', row.id)
+}
+
+function onRowCommand(row: ApiListRow, command: string | number | object): void {
+  const action = String(command)
+  if (row.type === 'folder') {
+    switch (action) {
+      case 'new-request':
+        emit('create-request', row.id)
+        break
+      case 'new-folder':
+        emit('create-folder', row.id)
+        break
+      case 'rename':
+        emit('rename-folder', row.id)
+        break
+      case 'remove':
+        emit('remove-folder', row.id)
+        break
+      default:
+        break
+    }
+    return
+  }
+  switch (action) {
+    case 'duplicate':
+      emit('duplicate', row.id)
+      break
+    case 'move':
+      emit('move', row.id)
+      break
+    case 'remove':
+      emit('remove', row.id)
+      break
+    default:
+      break
+  }
+}
+
+function onHeaderCommand(command: string | number | object): void {
+  switch (String(command)) {
+    case 'new-folder':
+      emit('create-folder', null)
+      break
+    case 'expand':
+      expandAll()
+      break
+    case 'collapse':
+      collapseAll()
+      break
+    case 'reveal':
+      emit('reveal')
+      break
+    default:
+      break
+  }
 }
 </script>
 
@@ -106,6 +269,19 @@ function formatTime(timestamp: number): string {
         :prefix-icon="Search"
         clearable
       />
+      <el-dropdown trigger="click" placement="bottom-end" @command="onHeaderCommand">
+        <button class="icon-toggle" type="button" title="列表操作">
+          <el-icon :size="14"><MoreFilled /></el-icon>
+        </button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="new-folder" :icon="FolderAdd">新建文件夹</el-dropdown-item>
+            <el-dropdown-item command="expand" :icon="Expand" divided>全部展开</el-dropdown-item>
+            <el-dropdown-item command="collapse" :icon="Fold">全部折叠</el-dropdown-item>
+            <el-dropdown-item command="reveal" :icon="FolderOpened" divided>打开数据文件位置</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <button class="icon-toggle" type="button" title="折叠请求列表" @click="emit('toggle')">
         <el-icon :size="14"><Fold /></el-icon>
       </button>
@@ -119,57 +295,90 @@ function formatTime(timestamp: number): string {
     </header>
 
     <div v-if="!collapsed" class="list-body">
-      <div v-if="requests.length === 0" class="list-empty">
+      <div v-if="!hasContent" class="list-empty">
         <span>当前项目还没有请求</span>
         <span class="tip">点击右上角「新请求」创建第一条请求记录</span>
       </div>
 
-      <div v-else-if="filtered.length === 0" class="list-empty">
+      <div v-else-if="rows.length === 0" class="list-empty">
         <span>没有匹配的请求</span>
         <span class="tip">换个关键字试试</span>
       </div>
 
       <div
-        v-for="item in filtered"
-        :key="item.id"
-        class="req-item"
-        :class="{ active: item.id === currentId }"
+        v-for="row in rows"
+        :key="`${row.type}-${row.id}`"
+        class="list-row"
+        :class="{
+          folder: row.type === 'folder',
+          active: row.type === 'request' && row.id === currentId
+        }"
+        :style="{ paddingLeft: `${6 + row.depth * 12}px` }"
         role="button"
         tabindex="0"
-        :title="`${item.method} ${item.url || '未填写请求地址'}`"
-        @click="emit('select', item.id)"
-        @keydown.enter.prevent="emit('select', item.id)"
+        :title="row.type === 'folder' ? row.folder.name : row.record.url || '未填写请求地址'"
+        @click="onRowClick(row)"
+        @keydown.enter.prevent="onRowClick(row)"
       >
-        <div class="req-top">
-          <span class="method-badge" :style="{ background: methodColor(item.method) }">{{ item.method }}</span>
-          <span class="req-name">{{ item.name }}</span>
-          <span v-if="item.id === dirtyId" class="unsaved-dot" title="有未保存的修改" />
-          <span v-if="item.lastStatus" class="status" :class="statusClass(item.lastStatus)">
-            {{ item.lastStatus }}
-          </span>
-        </div>
-        <div class="req-url">{{ item.url || '未填写请求地址' }}</div>
-        <div class="req-meta">
-          <span>{{ formatTime(item.updatedAt) }}</span>
-          <span v-if="item.lastDurationMs !== undefined">{{ formatDuration(item.lastDurationMs) }}</span>
-          <span v-if="paramCount(item)">{{ paramCount(item) }} 个参数</span>
-          <span v-if="item.body.type !== 'none'">{{ item.body.type }}</span>
-        </div>
+        <template v-if="row.type === 'folder'">
+          <el-icon class="folder-caret" :size="12">
+            <ArrowDown v-if="row.expanded" />
+            <Expand v-else />
+          </el-icon>
+          <el-icon class="folder-icon" :size="14"><FolderOpened /></el-icon>
+          <span class="row-name folder-name">{{ row.folder.name }}</span>
+          <span class="folder-count">{{ row.count }}</span>
+          <el-dropdown
+            trigger="click"
+            placement="bottom-end"
+            @command="(cmd: string | number | object) => onRowCommand(row, cmd)"
+          >
+            <button class="row-more" type="button" title="更多操作" @click.stop>
+              <el-icon :size="13"><MoreFilled /></el-icon>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="new-request" :icon="DocumentAdd">新建请求</el-dropdown-item>
+                <el-dropdown-item command="new-folder" :icon="FolderAdd">新建子文件夹</el-dropdown-item>
+                <el-dropdown-item command="rename" :icon="EditPen" divided>重命名</el-dropdown-item>
+                <el-dropdown-item command="remove" :icon="Delete">删除文件夹</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
 
-        <div class="req-actions">
-          <button class="mini-btn" title="复制为新请求" type="button" @click.stop="emit('duplicate', item.id)">
-            <el-icon :size="13"><CopyDocument /></el-icon>
-          </button>
-          <button class="mini-btn danger" title="删除该请求" type="button" @click.stop="emit('remove', item.id)">
-            <el-icon :size="13"><Delete /></el-icon>
-          </button>
-        </div>
+        <template v-else>
+          <span class="method-badge" :style="{ background: methodColor(row.record.method) }">
+            {{ row.record.method }}
+          </span>
+          <span class="row-name">{{ row.record.name }}</span>
+          <span v-if="row.id === dirtyId" class="unsaved-dot" title="有未保存的修改" />
+          <span class="status" :class="statusClass(row.record)">
+            {{ statusText(row.record) }}
+          </span>
+          <el-dropdown
+            trigger="click"
+            placement="bottom-end"
+            @command="(cmd: string | number | object) => onRowCommand(row, cmd)"
+          >
+            <button class="row-more" type="button" title="更多操作" @click.stop>
+              <el-icon :size="13"><MoreFilled /></el-icon>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="duplicate" :icon="CopyDocument">复制为副本</el-dropdown-item>
+                <el-dropdown-item command="move" :icon="FolderOpened">移动到文件夹…</el-dropdown-item>
+                <el-dropdown-item command="remove" :icon="Delete" divided>删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
       </div>
     </div>
 
     <div v-else class="rail-body">
       <el-tooltip
-        v-for="item in filtered"
+        v-for="item in requests"
         :key="item.id"
         :content="`${item.method} ${item.name}`"
         placement="right"
@@ -207,9 +416,14 @@ function formatTime(timestamp: number): string {
 
 <style scoped>
 .request-list {
-  width: 258px;
+  width: 268px;
   flex: none;
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.request-list .panel-title {
+  flex: none;
+  white-space: nowrap;
 }
 
 .request-list.collapsed {
@@ -230,7 +444,7 @@ function formatTime(timestamp: number): string {
 }
 
 .list-search {
-  width: 100px;
+  width: 96px;
 }
 
 .list-search :deep(.el-input__wrapper) {
@@ -272,10 +486,10 @@ function formatTime(timestamp: number): string {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px;
+  padding: 8px 6px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .rail-body {
@@ -353,35 +567,54 @@ function formatTime(timestamp: number): string {
   color: var(--app-text-3);
 }
 
-.req-item {
-  position: relative;
+/* 一行一条：请求类型 + 接口名称 + 请求结果，操作收进弹出菜单 */
+.list-row {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding-right: 4px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 7px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
   outline: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.req-item:hover,
-.req-item:focus-visible {
+.list-row:hover,
+.list-row:focus-visible {
   background: var(--app-hover);
   border-color: var(--app-border);
 }
 
-.req-item.active {
+.list-row.active {
   background: var(--app-primary-soft);
   border-color: rgba(47, 111, 237, 0.32);
 }
 
-.req-top {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+.list-row.folder {
+  color: var(--app-text-2);
+}
+
+.folder-caret {
+  flex: none;
+  color: var(--app-text-3);
+}
+
+.folder-icon {
+  flex: none;
+  color: #d9a441;
+}
+
+.folder-name {
+  font-weight: 600;
+  color: var(--app-text-2);
+}
+
+.folder-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--app-text-3);
 }
 
 .method-badge {
@@ -396,11 +629,10 @@ function formatTime(timestamp: number): string {
   letter-spacing: 0.2px;
 }
 
-.req-name {
+.row-name {
   flex: 1;
   min-width: 0;
   font-size: 12.5px;
-  font-weight: 600;
   color: var(--app-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -409,19 +641,21 @@ function formatTime(timestamp: number): string {
 
 .unsaved-dot {
   flex: none;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: #ef4444;
 }
 
 .status {
   flex: none;
+  min-width: 22px;
   padding: 0 5px;
   border-radius: 3px;
   font-size: 10.5px;
   font-weight: 600;
   line-height: 15px;
+  text-align: center;
   color: #fff;
 }
 
@@ -442,65 +676,35 @@ function formatTime(timestamp: number): string {
 }
 
 .status.unknown {
-  background: #94a3b8;
-}
-
-.req-url {
-  font-family: var(--app-mono);
-  font-size: 11.5px;
-  color: var(--app-text-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.req-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
+  background: var(--app-border-strong);
   color: var(--app-text-3);
 }
 
-.req-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: flex;
-  gap: 2px;
-  padding: 1px;
-  border-radius: 6px;
-  background: var(--app-panel);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-
-.req-item:hover .req-actions,
-.req-item:focus-within .req-actions {
-  opacity: 1;
-}
-
-.mini-btn {
+.row-more {
+  flex: none;
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
   border: none;
   border-radius: 5px;
   background: transparent;
   color: var(--app-text-3);
   cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.mini-btn:hover {
-  background: var(--app-hover);
+.list-row:hover .row-more,
+.list-row.active .row-more,
+.row-more:focus-visible {
+  opacity: 1;
+}
+
+.row-more:hover {
+  background: var(--app-panel);
   color: var(--app-primary);
-}
-
-.mini-btn.danger:hover {
-  background: rgba(220, 38, 38, 0.12);
-  color: #dc2626;
 }
 
 .list-footer {

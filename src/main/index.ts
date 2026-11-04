@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, screen, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc'
+import { bootstrapChat, stopChatServer } from './chat'
 import { loadSettings } from './store'
 import { setupSmokeCapture } from './smoke'
 
@@ -124,6 +125,11 @@ if (!gotTheLock) {
     registerIpcHandlers()
     mainWindow = createWindow()
 
+    // 启动本地聊天服务（端口在 chat.json 里配置，失败只记录原因，不影响其它工具）
+    void bootstrapChat().catch((error: unknown) => {
+      console.error('[chat] 启动失败', error)
+    })
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createWindow()
@@ -133,5 +139,9 @@ if (!gotTheLock) {
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
+  })
+
+  app.on('before-quit', () => {
+    void stopChatServer()
   })
 }

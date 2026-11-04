@@ -8,7 +8,14 @@ import type {
   ApiRequestDraft,
   ApiRequestSaveResult,
   AppSettings,
+  ChatFriend,
+  ChatFriendInput,
+  ChatMessage,
+  ChatProfile,
+  ChatSendInput,
+  ChatState,
   DesktopApi,
+  FileStatResult,
   HttpProgress,
   HttpResponseResult,
   HttpRequestConfig,
@@ -38,7 +45,8 @@ const api: DesktopApi = {
     readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),
     writeText: (filePath: string, content: string) => ipcRenderer.invoke('file:write-text', filePath, content),
     writeBinary: (filePath: string, base64: string) =>
-      ipcRenderer.invoke('file:write-binary', filePath, base64)
+      ipcRenderer.invoke('file:write-binary', filePath, base64),
+    stat: (filePath: string) => ipcRenderer.invoke('file:stat', filePath) as Promise<FileStatResult>
   },
   json: {
     formatFile: (request: JsonFileRequest) =>
@@ -70,11 +78,54 @@ const api: DesktopApi = {
       ipcRenderer.invoke('projects:save-request', projectId, draft) as Promise<ApiRequestSaveResult>,
     removeRequest: (projectId: string, requestId: string) =>
       ipcRenderer.invoke('projects:remove-request', projectId, requestId) as Promise<ApiProject[]>,
+    createFolder: (projectId: string, name: string, parentId: string | null) =>
+      ipcRenderer.invoke('projects:create-folder', projectId, name, parentId) as Promise<ApiProject[]>,
+    renameFolder: (projectId: string, folderId: string, name: string) =>
+      ipcRenderer.invoke('projects:rename-folder', projectId, folderId, name) as Promise<ApiProject[]>,
+    removeFolder: (projectId: string, folderId: string) =>
+      ipcRenderer.invoke('projects:remove-folder', projectId, folderId) as Promise<ApiProject[]>,
+    moveRequest: (projectId: string, requestId: string, folderId: string | null) =>
+      ipcRenderer.invoke('projects:move-request', projectId, requestId, folderId) as Promise<ApiProject[]>,
     recordResult: (projectId: string, requestId: string, result: ApiAttemptResult) =>
       ipcRenderer.invoke('projects:record-result', projectId, requestId, result) as Promise<ApiProject[]>,
     exportAll: () => ipcRenderer.invoke('projects:export') as Promise<ApiExportResult>,
     importFile: () => ipcRenderer.invoke('projects:import') as Promise<ApiImportResult>,
     reveal: () => ipcRenderer.invoke('projects:reveal') as Promise<void>
+  },
+  chat: {
+    state: () => ipcRenderer.invoke('chat:state') as Promise<ChatState>,
+    updateProfile: (patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>) =>
+      ipcRenderer.invoke('chat:update-profile', patch) as Promise<ChatState>,
+    addFriend: (input: ChatFriendInput) => ipcRenderer.invoke('chat:add-friend', input) as Promise<ChatState>,
+    updateFriend: (id: string, patch: Partial<ChatFriendInput>) =>
+      ipcRenderer.invoke('chat:update-friend', id, patch) as Promise<ChatState>,
+    removeFriend: (id: string) => ipcRenderer.invoke('chat:remove-friend', id) as Promise<ChatState>,
+    refreshFriend: (id: string) =>
+      ipcRenderer.invoke('chat:refresh-friend', id) as Promise<ChatFriend | null>,
+    refreshAll: () => ipcRenderer.invoke('chat:refresh-all') as Promise<ChatFriend[]>,
+    send: (input: ChatSendInput) => ipcRenderer.invoke('chat:send-text', input) as Promise<ChatMessage>,
+    sendImage: (friendId: string, dataUrl: string, fileName: string) =>
+      ipcRenderer.invoke('chat:send-image', friendId, dataUrl, fileName) as Promise<ChatMessage>,
+    sendFile: (friendId: string, filePath: string) =>
+      ipcRenderer.invoke('chat:send-file', friendId, filePath) as Promise<ChatMessage>,
+    clearHistory: (friendId: string) =>
+      ipcRenderer.invoke('chat:clear-history', friendId) as Promise<ChatState>,
+    readImage: (filePath: string) => ipcRenderer.invoke('chat:image-data', filePath) as Promise<string>,
+    chooseChatDir: () =>
+      ipcRenderer.invoke('chat:choose-dir') as Promise<{ canceled: boolean; dirPath?: string }>,
+    openChatDir: () => ipcRenderer.invoke('chat:open-dir') as Promise<void>,
+    openFile: (filePath: string) => ipcRenderer.invoke('chat:open-file', filePath) as Promise<void>,
+    revealFile: (filePath: string) => ipcRenderer.invoke('chat:reveal-file', filePath) as Promise<void>,
+    onMessage: (callback) => {
+      const handler = (_event: IpcRendererEvent, message: ChatMessage): void => callback(message)
+      ipcRenderer.on('chat:message', handler)
+      return () => ipcRenderer.removeListener('chat:message', handler)
+    },
+    onState: (callback) => {
+      const handler = (_event: IpcRendererEvent, state: ChatState): void => callback(state)
+      ipcRenderer.on('chat:state', handler)
+      return () => ipcRenderer.removeListener('chat:state', handler)
+    }
   },
   app: {
     info: () => ipcRenderer.invoke('app:info'),

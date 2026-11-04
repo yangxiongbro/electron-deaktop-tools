@@ -10,7 +10,13 @@ import type {
   ApiRequestDraft,
   ApiRequestSaveResult,
   ApiAttemptResult,
+  ChatFriendInput,
+  ChatMessage,
+  ChatProfile,
+  ChatSendInput,
+  ChatState,
   FilePickResult,
+  FileStatResult,
   JsonFileRequest,
   JsonFileResult,
   OpenFileOptions,
@@ -21,18 +27,38 @@ import type {
 import { formatJsonFile } from './jsonFile'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
 import {
+  createFolder,
   createProject,
   dataFile as apiDataFile,
   exportProjectsTo,
   importProjectsFrom,
   loadProjects,
+  moveRequest,
   projectsState,
   recordResult,
+  removeFolder,
   removeProject,
   removeRequest,
+  renameFolder,
   renameProject,
   saveRequest
 } from './apiProjects'
+import {
+  addFriend,
+  chatDataFile,
+  chatState,
+  clearHistory,
+  readImageDataUrl,
+  refreshAllFriends,
+  refreshFriend,
+  removeFriend,
+  sendFile,
+  sendImage,
+  sendText,
+  setChatDir,
+  updateFriend,
+  updateProfile
+} from './chat'
 import { configDir, defaultDownloadDir, loadSettings, settingsFile, updateSettings } from './store'
 import type { HttpRequestConfig } from '@shared/types'
 
@@ -165,6 +191,16 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  ipcMain.handle('file:stat', async (_event, filePath: string): Promise<FileStatResult> => {
+    try {
+      const target = assertAbsolutePath(filePath, '文件路径')
+      const stat = await fsp.stat(target)
+      return { exists: true, mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+      return { exists: false, mtimeMs: 0, size: 0 }
+    }
+  })
+
   /* ----------------------------- JSON 文件 ------------------------- */
 
   ipcMain.handle('json:format-file', async (event, request: JsonFileRequest): Promise<JsonFileResult> => {
@@ -223,6 +259,24 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('projects:remove-request', (_event, projectId: string, requestId: string) =>
     removeRequest(projectId, requestId)
+  )
+
+  ipcMain.handle(
+    'projects:create-folder',
+    (_event, projectId: string, name: string, parentId: string | null) =>
+      createFolder(projectId, name, parentId ?? null)
+  )
+
+  ipcMain.handle('projects:rename-folder', (_event, projectId: string, folderId: string, name: string) =>
+    renameFolder(projectId, folderId, name)
+  )
+
+  ipcMain.handle('projects:remove-folder', (_event, projectId: string, folderId: string) =>
+    removeFolder(projectId, folderId)
+  )
+
+  ipcMain.handle('projects:move-request', (_event, projectId: string, requestId: string, folderId: string | null) =>
+    moveRequest(projectId, requestId, folderId ?? null)
   )
 
   ipcMain.handle(
@@ -300,7 +354,8 @@ export function registerIpcHandlers(): void {
       defaultDownloadDir: defaultDownloadDir(),
       configDir: configDir(),
       settingsFile: settingsFile(),
-      apiDataFile: apiDataFile()
+      apiDataFile: apiDataFile(),
+      chatDataFile: chatDataFile()
     }
   })
 
@@ -319,5 +374,71 @@ export function registerIpcHandlers(): void {
       throw new Error('只允许打开 http/https 链接')
     }
     await shell.openExternal(url)
+  })
+
+  /* ----------------------------- 本地聊天 -------------------------- */
+
+  ipcMain.handle('chat:state', (): Promise<ChatState> => chatState())
+
+  ipcMain.handle(
+    'chat:update-profile',
+    (_event, patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>) => updateProfile(patch ?? {})
+  )
+
+  ipcMain.handle('chat:add-friend', (_event, input: ChatFriendInput) => addFriend(input))
+
+  ipcMain.handle('chat:update-friend', (_event, id: string, patch: Partial<ChatFriendInput>) =>
+    updateFriend(id, patch ?? {})
+  )
+
+  ipcMain.handle('chat:remove-friend', (_event, id: string) => removeFriend(id))
+
+  ipcMain.handle('chat:refresh-friend', (_event, id: string) => refreshFriend(id))
+
+  ipcMain.handle('chat:refresh-all', () => refreshAllFriends())
+
+  ipcMain.handle('chat:send-text', (_event, input: ChatSendInput): Promise<ChatMessage> => sendText(input))
+
+  ipcMain.handle('chat:send-image', (_event, friendId: string, dataUrl: string, fileName: string) =>
+    sendImage(friendId, dataUrl, fileName)
+  )
+
+  ipcMain.handle('chat:send-file', (_event, friendId: string, filePath: string) =>
+    sendFile(friendId, assertAbsolutePath(filePath, '文件路径'))
+  )
+
+  ipcMain.handle('chat:clear-history', (_event, friendId: string) => clearHistory(friendId))
+
+  ipcMain.handle('chat:image-data', (_event, filePath: string) => readImageDataUrl(filePath))
+
+  ipcMain.handle('chat:choose-dir', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const current = (await chatState()).chatDir
+    const args = {
+      title: '选择聊天文件保存目录',
+      defaultPath: current,
+      properties: ['openDirectory' as const, 'createDirectory' as const]
+    }
+    const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+    await setChatDir(result.filePaths[0])
+    return { canceled: false, dirPath: result.filePaths[0] }
+  })
+
+  ipcMain.handle('chat:open-dir', async () => {
+    const state = await chatState()
+    await fsp.mkdir(state.chatDir, { recursive: true }).catch(() => undefined)
+    const error = await shell.openPath(state.chatDir)
+    if (error) throw new Error(error)
+  })
+
+  ipcMain.handle('chat:open-file', async (_event, filePath: string) => {
+    const target = assertAbsolutePath(filePath, '文件路径')
+    const error = await shell.openPath(target)
+    if (error) throw new Error(error)
+  })
+
+  ipcMain.handle('chat:reveal-file', (_event, filePath: string) => {
+    shell.showItemInFolder(assertAbsolutePath(filePath, '文件路径'))
   })
 }

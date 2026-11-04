@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
   ArrowLeft,
@@ -20,6 +20,7 @@ import {
   Minus,
   Picture,
   Reading,
+  Search,
   Tickets,
   View
 } from '@element-plus/icons-vue'
@@ -45,6 +46,40 @@ const md = new MarkdownIt({
     return `<pre class="hljs"><code>${md.utils.escapeHtml(code)}</code></pre>`
   }
 })
+
+/**
+ * markdown-it 会把行首 1~3 个空格当作「缩进」直接吃掉，渲染出来就没有缩进了。
+ * 这里先把这类行首空白换成不换行空格（U+00A0），让缩进作为正文内容保留下来：
+ * - 制表符（从记事本等编辑器粘贴进来的内容常见）按 4 空格宽度展开；
+ * - 代码块（``` / ~~~）里的内容原样保留；
+ * - 依赖行首缩进的语法（列表、引用、标题、表格）不动；
+ * - 空行之后 4 个空格以上的行属于缩进代码块，也不动。
+ */
+function preserveIndent(source: string): string {
+  let inFence = false
+  let prevBlank = true
+  return source
+    .split('\n')
+    .map((line) => {
+      const wasBlank = prevBlank
+      prevBlank = line.trim() === ''
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence
+        return line
+      }
+      if (inFence) return line
+      const match = /^([ \t]+)(\S.*)$/.exec(line)
+      if (!match) return line
+      const rest = match[2]
+      // 列表 / 引用 / 标题 / 表格 / 链接定义依赖行首缩进或符号，不要动
+      if (/^([-*+]|\d+[.)]|>|\||#{1,6}\s|\[[^\]]+\]:)/.test(rest)) return line
+      let width = 0
+      for (const char of match[1]) width += char === '\t' ? 4 : 1
+      if (width > 3 && wasBlank) return line
+      return '\u00A0'.repeat(width) + rest
+    })
+    .join('\n')
+}
 
 const DEFAULT_CONTENT = `# Markdown 编辑器
 
@@ -112,6 +147,290 @@ const syntaxVisible = ref(false)
 const editorRef = ref<HTMLTextAreaElement | null>(null)
 const previewRef = ref<HTMLElement | null>(null)
 
+/* --------------------------- 文件状态 / 冲突 --------------------------- */
+
+/** 上一次保存（或打开）时的内容，用来判断有没有改动 */
+const savedContent = ref(DEFAULT_CONTENT)
+/** 文件最后修改时间，用来发现「被其它程序改过」 */
+const fileMtime = ref(0)
+const fileSize = ref(0)
+
+const dirty = computed(() => content.value !== savedContent.value)
+
+async function refreshFileStat(): Promise<void> {
+  if (!currentPath.value) {
+    fileMtime.value = 0
+    fileSize.value = 0
+    return
+  }
+  const stat = await window.api.file.stat(currentPath.value)
+  fileMtime.value = stat.exists ? stat.mtimeMs : 0
+  fileSize.value = stat.size
+}
+
+type ConflictAction = 'overwrite' | 'saveAs' | 'cancel'
+
+const conflictVisible = ref(false)
+let conflictResolver: ((action: ConflictAction) => void) | null = null
+
+function askSaveConflict(): Promise<ConflictAction> {
+  conflictVisible.value = true
+  return new Promise((resolve) => {
+    conflictResolver = resolve
+  })
+}
+
+function resolveConflict(action: ConflictAction): void {
+  conflictVisible.value = false
+  conflictResolver?.(action)
+  conflictResolver = null
+}
+
+/** 磁盘上的文件是不是在我们上次保存之后又被改过 */
+async function hasExternalChange(): Promise<boolean> {
+  if (!currentPath.value || !fileMtime.value) return false
+  const stat = await window.api.file.stat(currentPath.value)
+  return stat.exists && stat.mtimeMs !== fileMtime.value
+}
+
+/**
+ * 定时检查文件：如果打开之后没有任何修改、但磁盘上的文件变了，
+ * 直接把最新内容载入进来，省得用户看到的是过期内容。
+ */
+let fileWatchTimer: number | undefined
+
+async function checkExternalChange(): Promise<void> {
+  if (!currentPath.value) return
+  const stat = await window.api.file.stat(currentPath.value)
+  if (!stat.exists || stat.mtimeMs === fileMtime.value) return
+  // 本地有未保存的修改时不自动覆盖，交给保存时的冲突提示处理
+  if (dirty.value) return
+  const read = await window.api.file.readText(currentPath.value)
+  if (!read.ok) return
+  content.value = read.content ?? ''
+  savedContent.value = content.value
+  fileMtime.value = stat.mtimeMs
+  fileSize.value = stat.size
+  ElMessage.info('文件已被其它程序修改，已载入最新内容')
+}
+
+/* ------------------------------ 文本搜索 ------------------------------ */
+
+interface SearchMatch {
+  start: number
+  end: number
+}
+
+const searchVisible = ref(false)
+const searchQuery = ref('')
+const searchCaseSensitive = ref(false)
+const searchWholeWord = ref(false)
+const searchRegex = ref(false)
+const searchIndex = ref(0)
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** 根据当前的搜索条件与开关构造正则（编辑区和预览区共用） */
+function buildSearchRegex(): { regex: RegExp | null; error: string } {
+  const query = searchQuery.value
+  if (!query) return { regex: null, error: '' }
+  let pattern = searchRegex.value ? query : escapeRegExp(query)
+  if (searchWholeWord.value) {
+    pattern = `(?<![\\w\\u4e00-\\u9fa5])${pattern}(?![\\w\\u4e00-\\u9fa5])`
+  }
+  try {
+    return { regex: new RegExp(pattern, searchCaseSensitive.value ? 'g' : 'gi'), error: '' }
+  } catch (error) {
+    return { regex: null, error: `正则表达式有误：${(error as Error).message}` }
+  }
+}
+
+const searchResult = computed<{ matches: SearchMatch[]; error: string }>(() => {
+  const { regex, error } = buildSearchRegex()
+  if (!regex) return { matches: [], error }
+  const matches: SearchMatch[] = []
+  const text = content.value
+  let found: RegExpExecArray | null
+  let guard = 0
+  while ((found = regex.exec(text)) !== null) {
+    if (found[0].length === 0) {
+      regex.lastIndex += 1
+      continue
+    }
+    matches.push({ start: found.index, end: found.index + found[0].length })
+    if (matches.length >= 2000) break
+    guard += 1
+    if (guard > 20000) break
+  }
+  return { matches, error: '' }
+})
+
+const searchMatches = computed(() => searchResult.value.matches)
+
+/* --------------------------- 预览里的搜索高亮 --------------------------- */
+
+const PREVIEW_HIT = 'md-search-hit'
+/** 预览区一共高亮了多少处 */
+const previewHitCount = ref(0)
+
+function searchArticle(): HTMLElement | null {
+  return previewRef.value?.querySelector<HTMLElement>('.markdown-body') ?? null
+}
+
+/** 把上一次插入的 <mark> 还原成普通文本 */
+function clearPreviewHighlights(): void {
+  const article = searchArticle()
+  if (!article) return
+  const marks = article.querySelectorAll(`mark.${PREVIEW_HIT}`)
+  if (!marks.length) return
+  marks.forEach((mark) => {
+    const parent = mark.parentNode
+    if (!parent) return
+    parent.replaceChild(document.createTextNode(mark.textContent ?? ''), mark)
+  })
+  // 合并相邻文本节点，方便下次重新切分
+  article.normalize()
+}
+
+/**
+ * 在渲染好的预览里给命中文字套上 <mark>。
+ * markdown-it 的渲染结果是 v-html 生成的，这里只在 DOM 上做标记，
+ * 内容一变 Vue 会整体重写 innerHTML，不会残留。
+ */
+function applyPreviewHighlights(): void {
+  const article = searchArticle()
+  if (!article) {
+    previewHitCount.value = 0
+    return
+  }
+  clearPreviewHighlights()
+  previewHitCount.value = 0
+  if (!searchVisible.value) return
+
+  const { regex } = buildSearchRegex()
+  if (!regex) return
+
+  const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT)
+  const textNodes: Text[] = []
+  let node = walker.nextNode()
+  while (node) {
+    textNodes.push(node as Text)
+    node = walker.nextNode()
+  }
+
+  let hits = 0
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue ?? ''
+    if (!text.trim()) continue
+    regex.lastIndex = 0
+    const ranges: SearchMatch[] = []
+    let found: RegExpExecArray | null
+    while ((found = regex.exec(text)) !== null) {
+      if (found[0].length === 0) {
+        regex.lastIndex += 1
+        continue
+      }
+      ranges.push({ start: found.index, end: found.index + found[0].length })
+      if (ranges.length > 300) break
+    }
+    if (!ranges.length) continue
+
+    const fragment = document.createDocumentFragment()
+    let last = 0
+    for (const range of ranges) {
+      if (range.start > last) fragment.appendChild(document.createTextNode(text.slice(last, range.start)))
+      const mark = document.createElement('mark')
+      mark.className = PREVIEW_HIT
+      mark.textContent = text.slice(range.start, range.end)
+      fragment.appendChild(mark)
+      last = range.end
+      hits += 1
+    }
+    if (last < text.length) fragment.appendChild(document.createTextNode(text.slice(last)))
+    textNode.parentNode?.replaceChild(fragment, textNode)
+  }
+
+  previewHitCount.value = hits
+}
+
+function previewHitElements(): HTMLElement[] {
+  const article = searchArticle()
+  if (!article) return []
+  return Array.from(article.querySelectorAll<HTMLElement>(`mark.${PREVIEW_HIT}`))
+}
+
+/** 当前匹配项在预览里高亮成另一个颜色，并滚动到可视区域 */
+function syncPreviewCurrent(scroll: boolean): void {
+  const hits = previewHitElements()
+  if (!hits.length) return
+  const index = Math.min(searchIndex.value, hits.length - 1)
+  hits.forEach((hit, i) => hit.classList.toggle('current', i === index))
+  if (scroll) hits[index]?.scrollIntoView({ block: 'center' })
+}
+
+/** 当前应当显示的匹配总数：预览模式下以预览里实际高亮的数量为准 */
+const matchTotal = computed(() =>
+  viewMode.value === 'preview' ? previewHitCount.value : searchMatches.value.length
+)
+
+function openSearch(): void {
+  searchVisible.value = true
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.md-search-input input')
+    input?.focus()
+    input?.select()
+  })
+}
+
+function closeSearch(): void {
+  searchVisible.value = false
+  searchQuery.value = ''
+  clearPreviewHighlights()
+  previewHitCount.value = 0
+}
+
+function gotoMatch(index: number): void {
+  const total = matchTotal.value
+  if (!total) return
+  const normalized = ((index % total) + total) % total
+  searchIndex.value = normalized
+
+  // 编辑区：选中对应的源码位置
+  const editor = editorRef.value
+  const matches = searchMatches.value
+  if (editor && matches.length && viewMode.value !== 'preview') {
+    const match = matches[normalized % matches.length]
+    editor.focus()
+    editor.setSelectionRange(match.start, match.end)
+    const ratio = match.start / Math.max(1, content.value.length)
+    editor.scrollTop = Math.max(0, ratio * editor.scrollHeight - editor.clientHeight / 2)
+  }
+
+  // 预览区：高亮当前项并滚过去
+  syncPreviewCurrent(true)
+}
+
+function nextMatch(): void {
+  gotoMatch(searchIndex.value + 1)
+}
+
+function prevMatch(): void {
+  gotoMatch(searchIndex.value - 1)
+}
+
+// 搜索条件变化后重新高亮；换条件时回到第一个匹配
+watch(
+  [searchQuery, searchCaseSensitive, searchWholeWord, searchRegex],
+  () => {
+    searchIndex.value = 0
+    void nextTick(() => {
+      if (matchTotal.value > 0) gotoMatch(0)
+    })
+  }
+)
+
 /**
  * 预览里的标题锚点序号。
  * 每渲染一次都从 0 开始，目录项与标题按同一顺序编号，点击即可精确定位。
@@ -126,8 +445,19 @@ md.renderer.rules.heading_open = (tokens, idx, options, _env, self) => {
 
 const rendered = computed(() => {
   headingSeq = 0
-  return md.render(content.value)
+  return md.render(preserveIndent(content.value))
 })
+
+// 渲染结果 / 搜索条件 / 视图模式变化后重新给预览加高亮（等 DOM 更新完再做）
+watch(
+  [rendered, searchVisible, viewMode, searchQuery, searchCaseSensitive, searchWholeWord, searchRegex],
+  () => {
+    applyPreviewHighlights()
+    if (searchIndex.value >= matchTotal.value) searchIndex.value = 0
+    syncPreviewCurrent(false)
+  },
+  { flush: 'post' }
+)
 
 interface OutlineNode {
   index: number
@@ -351,6 +681,17 @@ function insertSyntax(snippet: string): void {
 }
 
 async function openFile(): Promise<void> {
+  if (dirty.value) {
+    try {
+      await ElMessageBox.confirm('当前文档有未保存的修改，打开其它文件会丢失这些修改，是否继续？', '未保存的修改', {
+        type: 'warning',
+        confirmButtonText: '继续打开',
+        cancelButtonText: '取消'
+      })
+    } catch {
+      return
+    }
+  }
   const pick = await window.api.dialog.openFile({
     title: '打开 Markdown 文件',
     filters: [
@@ -366,6 +707,8 @@ async function openFile(): Promise<void> {
   }
   content.value = read.content ?? ''
   currentPath.value = pick.filePath
+  await refreshFileStat()
+  savedContent.value = content.value
   ElMessage.success(`已打开 ${pick.fileName ?? ''}`)
 }
 
@@ -380,18 +723,35 @@ async function saveFile(forceNewPath = false): Promise<void> {
     if (pick.canceled || !pick.filePath) return
     target = pick.filePath
   }
+
+  // 保存前确认：磁盘上的文件在我们上次保存之后有没有被其它程序改过
+  if (target === currentPath.value && currentPath.value && dirty.value && (await hasExternalChange())) {
+    const action = await askSaveConflict()
+    if (action === 'cancel') return
+    if (action === 'saveAs') {
+      await saveFile(true)
+      return
+    }
+    // overwrite：继续往下写，覆盖其它程序的修改
+  }
+
   const write = await window.api.file.writeText(target, content.value)
   if (!write.ok) {
     ElMessage.error(write.error ?? '保存失败')
     return
   }
   currentPath.value = target
+  savedContent.value = content.value
+  await refreshFileStat()
   ElMessage.success('已保存')
 }
 
 function clearDocument(): void {
   content.value = ''
   currentPath.value = ''
+  savedContent.value = ''
+  fileMtime.value = 0
+  fileSize.value = 0
 }
 
 /**
@@ -452,6 +812,43 @@ function handleTab(event: KeyboardEvent): void {
   const end = el.selectionEnd
   replaceRange(start, end, '  ', start + 2, start + 2)
 }
+
+/* ---------------------------- 视图切换定位 ---------------------------- */
+
+/** 从预览切回编辑区时，把编辑区滚到预览所在的位置 */
+let pendingScrollRatio: number | null = null
+
+watch(viewMode, (next, prev) => {
+  if (prev !== 'edit' && next !== 'preview') {
+    const preview = previewRef.value
+    if (preview) {
+      const max = preview.scrollHeight - preview.clientHeight
+      pendingScrollRatio = max > 0 ? preview.scrollTop / max : 0
+    }
+  }
+  if (next !== 'preview' && pendingScrollRatio !== null) {
+    const ratio = pendingScrollRatio
+    pendingScrollRatio = null
+    void nextTick(() => {
+      const editor = editorRef.value
+      if (!editor) return
+      const max = editor.scrollHeight - editor.clientHeight
+      if (max > 0) editor.scrollTop = ratio * max
+    })
+  }
+})
+
+/* ------------------------------ 生命周期 ------------------------------ */
+
+onMounted(() => {
+  fileWatchTimer = window.setInterval(() => {
+    void checkExternalChange()
+  }, 2000)
+})
+
+onUnmounted(() => {
+  if (fileWatchTimer) window.clearInterval(fileWatchTimer)
+})
 </script>
 
 <template>
@@ -472,6 +869,7 @@ function handleTab(event: KeyboardEvent): void {
       <el-button size="small" :icon="FolderOpened" @click="openFile">打开</el-button>
       <el-button size="small" :icon="Document" @click="saveFile(false)">保存</el-button>
       <el-button size="small" :icon="Download" @click="saveFile(true)">另存为</el-button>
+      <el-button size="small" :icon="Search" @click="openSearch">搜索</el-button>
 
       <template v-if="!toolbarCollapsed">
         <el-divider direction="vertical" />
@@ -551,13 +949,61 @@ function handleTab(event: KeyboardEvent): void {
       </template>
     </div>
 
+    <div v-if="searchVisible" class="md-search-bar">
+      <el-input
+        v-model="searchQuery"
+        size="small"
+        class="md-search-input"
+        :placeholder="viewMode === 'preview' ? '在预览中查找' : '在文档中查找'"
+        clearable
+        @keydown.enter.prevent="nextMatch"
+        @keydown.shift.enter.prevent="prevMatch"
+        @keydown.esc.prevent="closeSearch"
+      />
+      <button
+        type="button"
+        class="search-toggle"
+        :class="{ on: searchCaseSensitive }"
+        title="区分大小写"
+        @click="searchCaseSensitive = !searchCaseSensitive"
+      >
+        Aa
+      </button>
+      <button
+        type="button"
+        class="search-toggle"
+        :class="{ on: searchWholeWord }"
+        title="整词匹配"
+        @click="searchWholeWord = !searchWholeWord"
+      >
+        词
+      </button>
+      <button
+        type="button"
+        class="search-toggle mono"
+        :class="{ on: searchRegex }"
+        title="正则表达式"
+        @click="searchRegex = !searchRegex"
+      >
+        .*
+      </button>
+      <span class="search-count" :class="{ error: searchResult.error }">
+        {{ searchResult.error ? '正则有误' : matchTotal ? `${searchIndex + 1} / ${matchTotal}` : '无结果' }}
+      </span>
+      <button type="button" class="search-btn" title="上一个（Shift + Enter）" @click="prevMatch">↑</button>
+      <button type="button" class="search-btn" title="下一个（Enter）" @click="nextMatch">↓</button>
+      <button type="button" class="search-btn" title="关闭" @click="closeSearch">×</button>
+    </div>
+
     <div class="md-body">
       <section v-show="viewMode !== 'preview'" class="panel md-editor-panel">
         <div class="panel-header">
           <span class="panel-title">{{ fileName }}</span>
+          <span v-if="dirty" class="dirty-dot" title="有未保存的修改" />
           <span class="spacer" />
           <span class="small muted">Markdown</span>
         </div>
+
         <div class="panel-body">
           <textarea
             ref="editorRef"
@@ -568,6 +1014,7 @@ function handleTab(event: KeyboardEvent): void {
             @scroll="onEditorScroll"
             @keydown.tab.prevent="handleTab"
             @keydown.ctrl.s.prevent="saveFile(false)"
+            @keydown.ctrl.f.prevent="openSearch"
           />
         </div>
       </section>
@@ -668,12 +1115,127 @@ function handleTab(event: KeyboardEvent): void {
     </div>
 
     <MarkdownSyntaxDialog v-model="syntaxVisible" @insert="insertSyntax" />
+
+    <el-dialog v-model="conflictVisible" title="文件已被修改" width="470px" :close-on-click-modal="false">
+      <div class="conflict-body">
+        <p class="conflict-file mono">{{ currentPath }}</p>
+        <p>这个文件在你上次保存之后已被其它程序修改。</p>
+        <p class="small muted">
+          「覆盖保存」会丢弃其它程序的修改；「另存为」会写到新文件，原文件保持不变。
+        </p>
+      </div>
+      <template #footer>
+        <el-button @click="resolveConflict('cancel')">取消保存</el-button>
+        <el-button @click="resolveConflict('saveAs')">另存为…</el-button>
+        <el-button type="primary" @click="resolveConflict('overwrite')">覆盖保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .md-toolbar {
   gap: 2px;
+}
+
+.dirty-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.header-action {
+  flex: none;
+}
+
+/* 文档内搜索 */
+.md-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel);
+  box-shadow: var(--app-shadow);
+}
+
+.md-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-toggle {
+  flex: none;
+  width: 26px;
+  height: 24px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel);
+  color: var(--app-text-2);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.search-toggle:hover {
+  border-color: var(--app-primary);
+  color: var(--app-primary);
+}
+
+.search-toggle.on {
+  background: var(--app-primary-soft);
+  border-color: var(--app-primary);
+  color: var(--app-primary);
+  font-weight: 600;
+}
+
+.search-count {
+  flex: none;
+  min-width: 58px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--app-text-3);
+}
+
+.search-count.error {
+  color: #dc2626;
+}
+
+.search-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.search-btn:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.conflict-body p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+
+.conflict-file {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
+  font-size: 12px;
+  color: var(--app-text-2);
+  word-break: break-all;
 }
 
 .collapse-btn {
@@ -1035,6 +1597,20 @@ function handleTab(event: KeyboardEvent): void {
 .markdown-body :deep(img) {
   max-width: 100%;
   border-radius: 6px;
+}
+
+/* 预览里搜索命中的文字：固定用深色字，深浅主题下都看得清 */
+.markdown-body :deep(mark.md-search-hit) {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: #fde68a;
+  color: #422006;
+}
+
+.markdown-body :deep(mark.md-search-hit.current) {
+  background: #f59e0b;
+  color: #1c1207;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.35);
 }
 
 .markdown-body :deep(hr) {

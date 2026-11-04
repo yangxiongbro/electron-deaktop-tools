@@ -90,6 +90,14 @@ export interface WriteTextResult {
   error?: string
 }
 
+/** 文件状态，用于 Markdown 编辑器的「文件是否被其它程序改过」判断 */
+export interface FileStatResult {
+  exists: boolean
+  /** 最后修改时间（毫秒） */
+  mtimeMs: number
+  size: number
+}
+
 /* ------------------------------------------------------------------ */
 /* JSON 文件处理                                                       */
 /* ------------------------------------------------------------------ */
@@ -265,11 +273,23 @@ export interface ApiRequestRecord {
   auth: HttpAuthConfig
   body: HttpBodyConfig
   options: ApiRequestOptions
+  /** 所属文件夹 id，null 表示在项目根目录 */
+  folderId: string | null
   /** 最近一次发送的结果（仅用于列表展示） */
   lastStatus?: number
   lastOk?: boolean
   lastDurationMs?: number
   lastSentAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+/** 请求列表里的文件夹，支持多级嵌套 */
+export interface ApiFolder {
+  id: string
+  name: string
+  /** 上级文件夹 id，null 表示项目根目录 */
+  parentId: string | null
   createdAt: number
   updatedAt: number
 }
@@ -280,11 +300,12 @@ export type ApiRequestDraft = Omit<ApiRequestRecord, 'createdAt' | 'updatedAt'> 
   updatedAt?: number
 }
 
-/** 一个项目下挂着自己的请求记录 */
+/** 一个项目下挂着自己的请求记录与文件夹 */
 export interface ApiProject {
   id: string
   name: string
   requests: ApiRequestRecord[]
+  folders: ApiFolder[]
   createdAt: number
   updatedAt: number
 }
@@ -323,6 +344,93 @@ export interface ApiImportResult {
 }
 
 /* ------------------------------------------------------------------ */
+/* 本地聊天                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 好友状态：在线（在用本程序）/ 离线（端口通但不是本程序）/ 不可达 */
+export type ChatPeerStatus = 'online' | 'offline' | 'unreachable'
+
+/** 本机资料，修改后会广播给在线好友 */
+export interface ChatProfile {
+  /** 稳定身份标识，用于对方识别「同一个人」 */
+  id: string
+  nickname: string
+  /** 头像：data URL（空字符串表示用昵称首字生成） */
+  avatar: string
+  /** 监听端口 */
+  port: number
+  /** 本机局域网 IP，只读，用于告诉好友该连哪个地址 */
+  host: string
+}
+
+export interface ChatFriend {
+  id: string
+  /** 备注名，优先显示 */
+  remark: string
+  ip: string
+  port: number
+  nickname: string
+  avatar: string
+  status: ChatPeerStatus
+  /** 最近一次探测到在线的时间 */
+  lastSeenAt: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type ChatMessageKind = 'text' | 'image' | 'file'
+
+export interface ChatMessage {
+  id: string
+  /** 所属好友 */
+  friendId: string
+  direction: 'in' | 'out'
+  kind: ChatMessageKind
+  /** 文字内容；图片 / 文件消息为说明文字（可为空） */
+  text: string
+  /** 原始文件名（图片 / 文件） */
+  fileName: string
+  /** 文件大小（图片 / 文件） */
+  fileSize: number
+  /** 已保存到本地的完整路径（图片 / 文件） */
+  filePath: string
+  /** 图片缩略 / 原图 data URL（仅图片消息，用于直接展示） */
+  dataUrl: string
+  createdAt: number
+  /** 发送失败时的错误信息 */
+  error?: string
+}
+
+export interface ChatState {
+  me: ChatProfile
+  friends: ChatFriend[]
+  /** 聊天记录，按时间升序 */
+  messages: ChatMessage[]
+  dataFile: string
+  /** 图片 / 文件的保存目录 */
+  chatDir: string
+  /** 服务是否正在监听 */
+  listening: boolean
+  /** 监听失败时的原因（端口被占用等） */
+  portError: string
+}
+
+export interface ChatFriendInput {
+  ip: string
+  port: number
+  remark: string
+}
+
+export interface ChatSendInput {
+  friendId: string
+  kind: ChatMessageKind
+  text: string
+  fileName?: string
+  /** 图片 / 文件的 base64（不含 data URL 前缀） */
+  base64?: string
+}
+
+/* ------------------------------------------------------------------ */
 /* 应用信息                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -343,6 +451,8 @@ export interface AppInfo {
   settingsFile: string
   /** API 请求数据文件完整路径（多项目 + 请求记录） */
   apiDataFile: string
+  /** 本地聊天数据文件完整路径 */
+  chatDataFile: string
 }
 
 /* ------------------------------------------------------------------ */
@@ -365,6 +475,8 @@ export interface DesktopApi {
     writeText(filePath: string, content: string): Promise<WriteTextResult>
     /** 把 base64 内容按原始字节写入文件，用于导出二进制响应 */
     writeBinary(filePath: string, base64: string): Promise<WriteTextResult>
+    /** 读取文件状态，用于判断文件是否被其它程序改动 */
+    stat(filePath: string): Promise<FileStatResult>
   }
   json: {
     formatFile(request: JsonFileRequest): Promise<JsonFileResult>
@@ -384,6 +496,13 @@ export interface DesktopApi {
     /** 新建或更新一条请求记录（带 id 即更新） */
     saveRequest(projectId: string, draft: ApiRequestDraft): Promise<ApiRequestSaveResult>
     removeRequest(projectId: string, requestId: string): Promise<ApiProject[]>
+    /** 新建文件夹（parentId 为空表示项目根目录） */
+    createFolder(projectId: string, name: string, parentId: string | null): Promise<ApiProject[]>
+    renameFolder(projectId: string, folderId: string, name: string): Promise<ApiProject[]>
+    /** 删除文件夹，连同其子文件夹与其中的请求一起删除 */
+    removeFolder(projectId: string, folderId: string): Promise<ApiProject[]>
+    /** 把请求移动到指定文件夹（folderId 为空表示根目录） */
+    moveRequest(projectId: string, requestId: string, folderId: string | null): Promise<ApiProject[]>
     /** 发送完成后把结果写回记录 */
     recordResult(projectId: string, requestId: string, result: ApiAttemptResult): Promise<ApiProject[]>
     /** 导出全部项目与请求到用户选择的文件，便于迁移到其他机器 */
@@ -392,6 +511,35 @@ export interface DesktopApi {
     importFile(): Promise<ApiImportResult>
     /** 在文件管理器中定位数据文件 */
     reveal(): Promise<void>
+  }
+  chat: {
+    /** 读取聊天状态（首次会生成随机昵称与头像） */
+    state(): Promise<ChatState>
+    /** 修改自己的资料（昵称 / 头像 / 端口），会广播给在线好友 */
+    updateProfile(patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>): Promise<ChatState>
+    addFriend(input: ChatFriendInput): Promise<ChatState>
+    updateFriend(id: string, patch: Partial<ChatFriendInput>): Promise<ChatState>
+    removeFriend(id: string): Promise<ChatState>
+    /** 重新探测一个好友的在线状态并同步其资料 */
+    refreshFriend(id: string): Promise<ChatFriend | null>
+    refreshAll(): Promise<ChatFriend[]>
+    send(input: ChatSendInput): Promise<ChatMessage>
+    /** 发送图片（dataUrl 由渲染进程压缩后传入） */
+    sendImage(friendId: string, dataUrl: string, fileName: string): Promise<ChatMessage>
+    /** 发送任意文件（按路径读取后发给对方） */
+    sendFile(friendId: string, filePath: string): Promise<ChatMessage>
+    clearHistory(friendId: string): Promise<ChatState>
+    /** 读取图片消息的内容，返回 data URL 供界面直接展示 */
+    readImage(filePath: string): Promise<string>
+    chooseChatDir(): Promise<{ canceled: boolean; dirPath?: string }>
+    /** 打开聊天文件保存目录 */
+    openChatDir(): Promise<void>
+    /** 用系统默认程序打开聊天里的文件 */
+    openFile(filePath: string): Promise<void>
+    /** 在文件管理器中定位聊天里的文件 */
+    revealFile(filePath: string): Promise<void>
+    onMessage(cb: (message: ChatMessage) => void): () => void
+    onState(cb: (state: ChatState) => void): () => void
   }
   app: {
     info(): Promise<AppInfo>

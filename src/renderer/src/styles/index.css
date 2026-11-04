@@ -294,6 +294,12 @@ body {
   margin-left: 0;
 }
 
+/* 上面把相邻按钮的默认间距清掉了，弹窗 / 确认框底部需要再把间距加回来 */
+.el-dialog__footer .el-button + .el-button,
+.el-message-box__btns .el-button + .el-button {
+  margin-left: 10px;
+}
+
 .fill-textarea {
   height: 100%;
 }

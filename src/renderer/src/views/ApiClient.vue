@@ -20,6 +20,7 @@ import {
 import { DEFAULT_CONTENT_TYPES } from '@shared/types'
 import type {
   ApiAttemptResult,
+  ApiFolder,
   ApiProject,
   ApiRequestDraft,
   ApiRequestRecord,
@@ -143,6 +144,8 @@ const dataFile = ref('')
 const currentProjectId = ref('')
 const currentRequestId = ref('')
 const draftName = ref('')
+/** 当前请求所在的文件夹（null 表示根目录），保存时一并写回 */
+const draftFolderId = ref<string | null>(null)
 
 const state = reactive<RequestForm>(defaultForm())
 const loading = ref(true)
@@ -168,10 +171,58 @@ const autoSaveEnabled = computed(() => settings.apiAutoSave)
 
 const currentProject = computed(() => projects.value.find((item) => item.id === currentProjectId.value) ?? null)
 const currentRequests = computed(() => currentProject.value?.requests ?? [])
+const currentFolders = computed(() => currentProject.value?.folders ?? [])
 const currentRecord = computed(
   () => currentRequests.value.find((item) => item.id === currentRequestId.value) ?? null
 )
 const saving = computed(() => pendingSaves.value > 0)
+
+/* --------------------------- 请求结果缓存 --------------------------- */
+
+interface CachedResponse {
+  response: HttpResponseResult
+  sentRequest: { method: string; url: string; headers: KeyValueRow[] } | null
+  responseSection: string
+  bodyView: 'pretty' | 'tree'
+  requestTab: string
+  at: number
+}
+
+/**
+ * 每个请求各自记住「最近一次响应 + 查看状态」。
+ * 以前切换请求时会把响应清空，切回来就看不到刚才的结果了。
+ */
+const responseCache = new Map<string, CachedResponse>()
+const MAX_RESPONSE_CACHE = 20
+
+function rememberResponse(): void {
+  const id = currentRequestId.value
+  if (!id || !response.value) return
+  responseCache.set(id, {
+    response: response.value,
+    sentRequest: sentRequest.value,
+    responseSection: responseSection.value,
+    bodyView: bodyView.value,
+    requestTab: requestTab.value,
+    at: Date.now()
+  })
+  if (responseCache.size > MAX_RESPONSE_CACHE) {
+    const oldest = [...responseCache.entries()].sort((left, right) => left[1].at - right[1].at)[0]
+    if (oldest) responseCache.delete(oldest[0])
+  }
+}
+
+function restoreResponse(id: string): boolean {
+  const cached = responseCache.get(id)
+  if (!cached) return false
+  response.value = cached.response
+  sentRequest.value = cached.sentRequest
+  responseSection.value = cached.responseSection
+  bodyView.value = cached.bodyView
+  requestTab.value = cached.requestTab
+  cached.at = Date.now()
+  return true
+}
 
 const methodColor = computed(() => {
   const map: Record<string, string> = {
@@ -577,6 +628,7 @@ function loadRecord(record: ApiRequestRecord | null): void {
   }
   urlSyncBusy = false
   reconcileUrlAndParams()
+  draftFolderId.value = record?.folderId ?? null
   if (record) {
     requestTab.value = record.body.type === 'none' ? 'params' : 'body'
   } else {
@@ -591,6 +643,8 @@ function loadRecord(record: ApiRequestRecord | null): void {
   sentRequest.value = null
   responseSection.value = 'body'
   bodyView.value = 'pretty'
+  // 切回这个请求时，把它上一次的响应和查看状态恢复出来
+  if (record) restoreResponse(record.id)
 }
 
 function buildDraft(): ApiRequestDraft {
@@ -598,6 +652,7 @@ function buildDraft(): ApiRequestDraft {
   return {
     id: currentRequestId.value,
     name: draftName.value.trim(),
+    folderId: draftFolderId.value,
     ...form
   }
 }
@@ -624,11 +679,11 @@ async function switchProject(projectId: string): Promise<void> {
 
 /* ------------------------------ 新建 / 删除 ------------------------------ */
 
-function emptyDraft(name: string): ApiRequestDraft {
-  return { id: '', name, ...defaultForm() }
+function emptyDraft(name: string, folderId: string | null = null): ApiRequestDraft {
+  return { id: '', name, folderId, ...defaultForm() }
 }
 
-async function createRequest(): Promise<void> {
+async function createRequest(folderId: string | null = null): Promise<void> {
   const project = currentProject.value
   if (!project) {
     ElMessage.warning('请先创建一个项目')
@@ -638,7 +693,7 @@ async function createRequest(): Promise<void> {
   try {
     const result = await window.api.projects.saveRequest(
       project.id,
-      emptyDraft(`新请求 ${project.requests.length + 1}`)
+      emptyDraft(`新请求 ${project.requests.length + 1}`, folderId)
     )
     applyProjects(result.projects)
     currentProjectId.value = project.id
@@ -665,7 +720,8 @@ async function duplicateRequest(id: string): Promise<void> {
       headers: record.headers.map((row) => ({ ...row })),
       auth: { ...record.auth },
       body: { ...record.body, form: record.body.form.map((row) => ({ ...row })) },
-      options: { ...record.options }
+      options: { ...record.options },
+      folderId: record.folderId ?? null
     })
     applyProjects(result.projects)
     loadRecord(result.record)
@@ -692,12 +748,177 @@ async function deleteRequest(id: string): Promise<void> {
   try {
     const next = await window.api.projects.removeRequest(project.id, id)
     applyProjects(next)
+    responseCache.delete(id)
     if (currentRequestId.value === id) {
-      loadRecord(next.find((item) => item.id === project.id)?.requests[0] ?? null)
+      const remaining = next.find((item) => item.id === project.id)?.requests[0] ?? null
+      loadRecord(remaining)
       saveSelection()
     }
   } catch (error) {
     ElMessage.error(`删除请求失败：${(error as Error).message}`)
+  }
+}
+
+/* ------------------------------ 文件夹操作 ------------------------------ */
+
+async function promptFolderName(title: string, initial = ''): Promise<string | null> {
+  try {
+    const result = (await ElMessageBox.prompt('文件夹名称', title, {
+      inputValue: initial,
+      inputPlaceholder: '例如：用户相关',
+      inputValidator: (value: string) => (value && value.trim() ? true : '文件夹名称不能为空'),
+      confirmButtonText: '确定',
+      cancelButtonText: '取消'
+    })) as unknown as { value?: string }
+    return String(result.value ?? '').trim() || null
+  } catch {
+    return null
+  }
+}
+
+async function createFolder(parentId: string | null): Promise<void> {
+  const project = currentProject.value
+  if (!project) return
+  const parent = parentId ? project.folders.find((item) => item.id === parentId) : null
+  const name = await promptFolderName(parent ? `在「${parent.name}」下新建文件夹` : '新建文件夹')
+  if (!name) return
+  try {
+    applyProjects(await window.api.projects.createFolder(project.id, name, parentId))
+    ElMessage.success(`已创建文件夹「${name}」`)
+  } catch (error) {
+    ElMessage.error(`新建文件夹失败：${(error as Error).message}`)
+  }
+}
+
+async function renameFolder(id: string): Promise<void> {
+  const project = currentProject.value
+  const folder = project?.folders.find((item) => item.id === id)
+  if (!project || !folder) return
+  const name = await promptFolderName('重命名文件夹', folder.name)
+  if (!name || name === folder.name) return
+  try {
+    applyProjects(await window.api.projects.renameFolder(project.id, id, name))
+    ElMessage.success('文件夹已重命名')
+  } catch (error) {
+    ElMessage.error(`重命名失败：${(error as Error).message}`)
+  }
+}
+
+/** 文件夹下的请求数量（含子文件夹），删除前提示用 */
+function countRequestsInFolder(project: ApiProject, folderId: string): number {
+  const doomed = new Set<string>([folderId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const folder of project.folders) {
+      if (folder.parentId && doomed.has(folder.parentId) && !doomed.has(folder.id)) {
+        doomed.add(folder.id)
+        changed = true
+      }
+    }
+  }
+  return project.requests.filter((item) => item.folderId && doomed.has(item.folderId)).length
+}
+
+async function removeFolder(id: string): Promise<void> {
+  const project = currentProject.value
+  const folder = project?.folders.find((item) => item.id === id)
+  if (!project || !folder) return
+
+  const requestCount = countRequestsInFolder(project, id)
+  try {
+    await ElMessageBox.confirm(
+      requestCount
+        ? `确定删除文件夹「${folder.name}」吗？其中的 ${requestCount} 条请求（含子文件夹）会一起删除，且无法恢复。`
+        : `确定删除文件夹「${folder.name}」吗？其中的子文件夹会一起删除。`,
+      '删除文件夹',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+
+  clearAutosave()
+  dirty.value = false
+  try {
+    const next = await window.api.projects.removeFolder(project.id, id)
+    applyProjects(next)
+    // 当前请求可能被一起删掉了，回到列表里的第一条
+    const stillExists = (next.find((item) => item.id === project.id)?.requests ?? []).some(
+      (item) => item.id === currentRequestId.value
+    )
+    if (!stillExists) {
+      loadRecord(next.find((item) => item.id === project.id)?.requests[0] ?? null)
+      saveSelection()
+    }
+    ElMessage.success('文件夹已删除')
+  } catch (error) {
+    ElMessage.error(`删除文件夹失败：${(error as Error).message}`)
+  }
+}
+
+/* ------------------------------ 移动到文件夹 ------------------------------ */
+
+const moveDialog = ref(false)
+const moveRequestId = ref('')
+const moveTargetId = ref<string>('')
+
+interface FolderOption {
+  id: string
+  label: string
+}
+
+function folderDepth(folder: ApiFolder, all: ApiFolder[]): number {
+  let depth = 0
+  let parent = folder.parentId
+  const guard = new Set<string>()
+  while (parent && !guard.has(parent)) {
+    guard.add(parent)
+    const item = all.find((entry) => entry.id === parent)
+    if (!item) break
+    depth += 1
+    parent = item.parentId
+  }
+  return depth
+}
+
+const folderOptions = computed<FolderOption[]>(() => {
+  const all = currentFolders.value
+  const options: FolderOption[] = [{ id: '', label: '根目录' }]
+  const build = (parentId: string | null): void => {
+    const children = all
+      .filter((item) => (item.parentId ?? null) === parentId)
+      .sort((left, right) => left.createdAt - right.createdAt)
+    for (const folder of children) {
+      options.push({ id: folder.id, label: `${'　'.repeat(folderDepth(folder, all))}${folder.name}` })
+      build(folder.id)
+    }
+  }
+  build(null)
+  return options
+})
+
+function openMoveDialog(requestId: string): void {
+  const record = currentRequests.value.find((item) => item.id === requestId)
+  if (!record) return
+  moveRequestId.value = requestId
+  moveTargetId.value = record.folderId ?? ''
+  moveDialog.value = true
+}
+
+async function confirmMove(): Promise<void> {
+  const project = currentProject.value
+  if (!project || !moveRequestId.value) return
+  try {
+    applyProjects(
+      await window.api.projects.moveRequest(project.id, moveRequestId.value, moveTargetId.value || null)
+    )
+    const moved = currentRequests.value.find((item) => item.id === moveRequestId.value)
+    if (moved && moved.id === currentRequestId.value) draftFolderId.value = moved.folderId ?? null
+    moveDialog.value = false
+    ElMessage.success('已移动')
+  } catch (error) {
+    ElMessage.error(`移动失败：${(error as Error).message}`)
   }
 }
 
@@ -949,6 +1170,7 @@ async function send(): Promise<void> {
   } finally {
     sending.value = false
     activeRequestId.value = ''
+    rememberResponse()
     void persistAttempt({ status, ok, durationMs })
   }
 }
@@ -1106,7 +1328,17 @@ function resetForm(): void {
   Object.assign(state, defaultForm())
   response.value = null
   sentRequest.value = null
+  responseCache.delete(currentRequestId.value)
 }
+
+/** 记住用户对响应面板的切换，切回这个请求时保持一致 */
+watch([responseSection, bodyView], () => {
+  const id = currentRequestId.value
+  const cached = id ? responseCache.get(id) : undefined
+  if (!cached) return
+  cached.responseSection = responseSection.value
+  cached.bodyView = bodyView.value
+})
 
 async function manualSave(): Promise<void> {
   if (!currentRequestId.value) {
@@ -1245,7 +1477,7 @@ onUnmounted(() => {
       <span v-if="currentProject" class="small muted project-summary">
         {{ currentProject.requests.length }} 条请求 · {{ autoSaveEnabled ? '自动保存' : '手动保存' }}
       </span>
-      <el-button :icon="Plus" @click="createRequest">新请求</el-button>
+      <el-button :icon="Plus" @click="createRequest()">新请求</el-button>
       <el-tooltip :content="saveTooltip" placement="bottom">
         <el-badge is-dot :hidden="!dirty" class="save-badge">
           <el-button :icon="Check" :disabled="!currentRequestId" :loading="saving" @click="manualSave">
@@ -1258,6 +1490,7 @@ onUnmounted(() => {
     <div class="page-body">
       <ApiRequestList
         :requests="currentRequests"
+        :folders="currentFolders"
         :current-id="currentRequestId"
         :dirty-id="dirty ? currentRequestId : ''"
         :data-file="dataFile"
@@ -1265,6 +1498,11 @@ onUnmounted(() => {
         @select="selectRequest"
         @duplicate="duplicateRequest"
         @remove="deleteRequest"
+        @create-request="createRequest"
+        @create-folder="createFolder"
+        @rename-folder="renameFolder"
+        @remove-folder="removeFolder"
+        @move="openMoveDialog"
         @reveal="revealDataFile"
         @toggle="toggleRequestList"
       />
@@ -1275,7 +1513,7 @@ onUnmounted(() => {
         <div class="small muted empty-desc">
           点击右上角「新请求」创建一条请求记录；也可以从左侧列表选择已有请求。
         </div>
-        <el-button type="primary" :icon="Plus" @click="createRequest">新请求</el-button>
+        <el-button type="primary" :icon="Plus" @click="createRequest()">新请求</el-button>
       </div>
 
       <div v-else class="api-main">
@@ -1681,6 +1919,24 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="resetContentTypes">恢复默认</el-button>
         <el-button type="primary" @click="contentTypeDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="moveDialog" title="移动到文件夹" width="420px" append-to-body>
+      <div class="move-form">
+        <span class="small muted">选择目标文件夹，移动后该请求会出现在对应文件夹下。</span>
+        <el-select v-model="moveTargetId" placeholder="选择文件夹" style="width: 100%">
+          <el-option
+            v-for="option in folderOptions"
+            :key="option.id || 'root'"
+            :label="option.label"
+            :value="option.id"
+          />
+        </el-select>
+      </div>
+      <template #footer>
+        <el-button @click="moveDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmMove">确定移动</el-button>
       </template>
     </el-dialog>
   </div>
@@ -2203,6 +2459,12 @@ onUnmounted(() => {
   gap: 4px;
   max-height: 320px;
   overflow: auto;
+}
+
+.move-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .ct-item {

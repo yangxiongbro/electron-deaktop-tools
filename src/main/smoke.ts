@@ -13,7 +13,7 @@ export function setupSmokeCapture(win: BrowserWindow): void {
   const outputDir = process.env.DSH_SMOKE_DIR
   if (!outputDir) return
 
-  const tools = ['json', 'naming', 'codec', 'api', 'markdown', 'cron', 'settings']
+  const tools = ['json', 'naming', 'codec', 'api', 'markdown', 'cron', 'chat', 'settings']
 
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -27,7 +27,7 @@ export function setupSmokeCapture(win: BrowserWindow): void {
 
   /** 在 API 页面点击「新请求」并填入示例内容，让截图更接近真实使用场景 */
   const seedApiRequest = async (): Promise<void> => {
-    const hasRequests = await runScript(`document.querySelectorAll('.req-item').length > 0`)
+    const hasRequests = await runScript(`document.querySelectorAll('.list-row').length > 0`)
     if (hasRequests) {
       // 已有数据（例如预置的示例数据）时直接展示，不再新建空请求
       await wait(600)
@@ -94,6 +94,43 @@ export function setupSmokeCapture(win: BrowserWindow): void {
         }
         await openSyntaxDialog('markdown', 'markdown-syntax.png')
         await openSyntaxDialog('cron', 'cron-syntax.png')
+
+        // Markdown 文档内搜索：预览模式下高亮命中文字
+        await runScript(`window.__toolbox && window.__toolbox.setTool('markdown')`)
+        await wait(600)
+        await runScript(`(() => {
+          const textarea = document.querySelector('.md-textarea')
+          if (!textarea) return false
+          textarea.value = '# 搜索测试\\n\\n这是一段包含关键词的文本，关键词出现了多次。\\n\\n- 关键词在列表里\\n- 另一个关键词\\n\\n最后一段也有 关键词。\\n'
+          textarea.dispatchEvent(new Event('input', { bubbles: true }))
+          return true
+        })()`)
+        await wait(400)
+        await runScript(`(() => {
+          const btn = Array.from(document.querySelectorAll('.segmented-item')).find(
+            (item) => (item.textContent || '').trim() === '预览'
+          )
+          if (btn) btn.click()
+          return Boolean(btn)
+        })()`)
+        await wait(600)
+        await runScript(`(() => {
+          const btn = Array.from(document.querySelectorAll('button')).find(
+            (item) => (item.textContent || '').replace(/\\s+/g, '') === '搜索'
+          )
+          if (btn) btn.click()
+          return Boolean(btn)
+        })()`)
+        await wait(400)
+        await runScript(`(() => {
+          const input = document.querySelector('.md-search-input input')
+          if (!input) return false
+          input.value = '关键词'
+          input.dispatchEvent(new Event('input', { bubbles: true }))
+          return true
+        })()`)
+        await wait(900)
+        await capture('markdown-search.png')
 
         // 多项目：展开项目下拉，展示「按项目管理请求」的能力
         await runScript(`window.__toolbox && window.__toolbox.setTool('api')`)
