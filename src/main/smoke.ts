@@ -18,6 +18,18 @@ export function setupSmokeCapture(win: BrowserWindow): void {
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
   const capture = async (name: string): Promise<void> => {
+    // 窗口被遮挡时 Chromium 会停止合成新帧，capturePage 会拿到旧画面，
+    // 所以截图前先确保窗口可见并强制刷新两帧
+    if (!win.isVisible()) win.show()
+    win.focus()
+    try {
+      await win.webContents.executeJavaScript(
+        'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))'
+      )
+    } catch {
+      // 页面正在切换时忽略
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
     const image = await win.webContents.capturePage()
     await fsp.writeFile(join(outputDir, name), image.toPNG())
   }
@@ -77,6 +89,17 @@ export function setupSmokeCapture(win: BrowserWindow): void {
         }
 
         // 语法弹窗：Markdown 与 Cron 各截一张
+        const closeVisibleDialog = async (): Promise<void> => {
+          await runScript(`(() => {
+            const dialog = Array.from(document.querySelectorAll('.el-dialog')).find(
+              (item) => item.offsetParent !== null
+            )
+            const close = dialog && dialog.querySelector('.el-dialog__headerbtn')
+            if (close) close.click()
+            return Boolean(close)
+          })()`)
+          await wait(500)
+        }
         const openSyntaxDialog = async (tool: string, file: string): Promise<void> => {
           await runScript(`window.__toolbox && window.__toolbox.setTool(${JSON.stringify(tool)})`)
           await wait(700)
@@ -89,11 +112,18 @@ export function setupSmokeCapture(win: BrowserWindow): void {
           })()`)
           await wait(700)
           await capture(file)
-          await runScript(`document.querySelector('.el-dialog__footer button')?.click()`)
-          await wait(400)
+          await closeVisibleDialog()
         }
         await openSyntaxDialog('markdown', 'markdown-syntax.png')
         await openSyntaxDialog('cron', 'cron-syntax.png')
+
+        // 新好友：申请记录弹窗
+        await runScript(`window.__toolbox && window.__toolbox.setTool('chat')`)
+        await wait(700)
+        await runScript(`document.querySelector('.friend-badge button')?.click()`)
+        await wait(900)
+        await capture('chat-requests.png')
+        await closeVisibleDialog()
 
         // Markdown 文档内搜索：预览模式下高亮命中文字
         await runScript(`window.__toolbox && window.__toolbox.setTool('markdown')`)

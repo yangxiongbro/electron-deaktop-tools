@@ -61,6 +61,8 @@ interface RequestForm {
 
 /** 记住上次选中的项目 / 请求，下次打开直接回到现场 */
 const SELECTION_KEY = 'devtoolbox.api.selection.v2'
+/** 请求列表排序方式：按创建时间 / 手动拖拽 */
+const SORT_KEY = 'devtoolbox.api.sortMode'
 /** 旧版本把单个草稿存在 localStorage，这里顺手清理 */
 const LEGACY_STATE_KEY = 'devtoolbox.api.state.v1'
 
@@ -168,6 +170,50 @@ const newContentType = ref('')
 
 const listCollapsed = computed(() => settings.apiSidebarCollapsed)
 const autoSaveEnabled = computed(() => settings.apiAutoSave)
+
+/* ------------------------------ 列表排序 ------------------------------ */
+
+type SortMode = 'created' | 'manual'
+
+function readSortMode(): SortMode {
+  try {
+    return localStorage.getItem(SORT_KEY) === 'manual' ? 'manual' : 'created'
+  } catch {
+    return 'created'
+  }
+}
+
+const sortMode = ref<SortMode>(readSortMode())
+const manualSort = computed(() => sortMode.value === 'manual')
+
+function setSortMode(mode: SortMode): void {
+  if (sortMode.value === mode) return
+  sortMode.value = mode
+  try {
+    localStorage.setItem(SORT_KEY, mode)
+  } catch {
+    // 忽略 localStorage 不可用
+  }
+  ElMessage.success(mode === 'manual' ? '已切换到手动排序，拖动行即可调整顺序' : '已按创建时间排序')
+}
+
+async function reorderItems(
+  kind: 'folder' | 'request',
+  parentId: string | null,
+  ids: string[]
+): Promise<void> {
+  const project = currentProject.value
+  if (!project) return
+  try {
+    const next =
+      kind === 'folder'
+        ? await window.api.projects.reorderFolders(project.id, parentId, ids)
+        : await window.api.projects.reorderRequests(project.id, parentId, ids)
+    applyProjects(next)
+  } catch (error) {
+    ElMessage.error(`调整顺序失败：${(error as Error).message}`)
+  }
+}
 
 const currentProject = computed(() => projects.value.find((item) => item.id === currentProjectId.value) ?? null)
 const currentRequests = computed(() => currentProject.value?.requests ?? [])
@@ -1495,6 +1541,7 @@ onUnmounted(() => {
         :dirty-id="dirty ? currentRequestId : ''"
         :data-file="dataFile"
         :collapsed="listCollapsed"
+        :manual-sort="manualSort"
         @select="selectRequest"
         @duplicate="duplicateRequest"
         @remove="deleteRequest"
@@ -1503,6 +1550,8 @@ onUnmounted(() => {
         @rename-folder="renameFolder"
         @remove-folder="removeFolder"
         @move="openMoveDialog"
+        @reorder="reorderItems"
+        @sort-mode="setSortMode"
         @reveal="revealDataFile"
         @toggle="toggleRequestList"
       />

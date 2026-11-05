@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Fold, Expand } from '@element-plus/icons-vue'
+import appIcon from '../assets/app-icon.svg'
 import type { ToolMeta } from '../tools'
 
 defineProps<{
@@ -19,7 +20,9 @@ const emit = defineEmits<{
 <template>
   <aside class="sidebar" :class="{ collapsed }">
     <div class="brand">
-      <div class="brand-logo">DT</div>
+      <div class="brand-logo">
+        <img :src="appIcon" alt="DevToolbox" class="brand-icon" />
+      </div>
       <transition name="fade">
         <div v-if="!collapsed" class="brand-text">
           <span class="brand-name">DevToolbox</span>
@@ -118,12 +121,14 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
-  font-size: 13px;
-  letter-spacing: -0.5px;
-  color: #fff;
-  background: linear-gradient(135deg, #4f8cff, #2f6fed 55%, #6f5bff);
-  box-shadow: 0 2px 6px rgba(47, 111, 237, 0.35);
+  background: var(--app-panel-muted);
+  border: 1px solid var(--app-border);
+}
+
+.brand-icon {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 
 .brand-text {

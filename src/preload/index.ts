@@ -86,6 +86,10 @@ const api: DesktopApi = {
       ipcRenderer.invoke('projects:remove-folder', projectId, folderId) as Promise<ApiProject[]>,
     moveRequest: (projectId: string, requestId: string, folderId: string | null) =>
       ipcRenderer.invoke('projects:move-request', projectId, requestId, folderId) as Promise<ApiProject[]>,
+    reorderRequests: (projectId: string, folderId: string | null, orderedIds: string[]) =>
+      ipcRenderer.invoke('projects:reorder-requests', projectId, folderId, orderedIds) as Promise<ApiProject[]>,
+    reorderFolders: (projectId: string, parentId: string | null, orderedIds: string[]) =>
+      ipcRenderer.invoke('projects:reorder-folders', projectId, parentId, orderedIds) as Promise<ApiProject[]>,
     recordResult: (projectId: string, requestId: string, result: ApiAttemptResult) =>
       ipcRenderer.invoke('projects:record-result', projectId, requestId, result) as Promise<ApiProject[]>,
     exportAll: () => ipcRenderer.invoke('projects:export') as Promise<ApiExportResult>,
@@ -97,6 +101,13 @@ const api: DesktopApi = {
     updateProfile: (patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>) =>
       ipcRenderer.invoke('chat:update-profile', patch) as Promise<ChatState>,
     addFriend: (input: ChatFriendInput) => ipcRenderer.invoke('chat:add-friend', input) as Promise<ChatState>,
+    sendFriendRequest: (input: ChatFriendInput) =>
+      ipcRenderer.invoke('chat:send-friend-request', input) as Promise<ChatState>,
+    respondFriendRequest: (id: string, accepted: boolean, inheritHistory: boolean) =>
+      ipcRenderer.invoke('chat:respond-friend-request', id, accepted, inheritHistory) as Promise<ChatState>,
+    dismissRequest: (id: string) =>
+      ipcRenderer.invoke('chat:dismiss-request', id) as Promise<ChatState>,
+    resendRequests: () => ipcRenderer.invoke('chat:resend-requests') as Promise<ChatState>,
     updateFriend: (id: string, patch: Partial<ChatFriendInput>) =>
       ipcRenderer.invoke('chat:update-friend', id, patch) as Promise<ChatState>,
     removeFriend: (id: string) => ipcRenderer.invoke('chat:remove-friend', id) as Promise<ChatState>,

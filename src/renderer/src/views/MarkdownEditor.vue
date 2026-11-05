@@ -581,12 +581,17 @@ const fileName = computed(() => {
 })
 
 function replaceRange(start: number, end: number, text: string, selectStart: number, selectEnd: number): void {
+  const el = editorRef.value
+  // v-model 重设 textarea.value 时浏览器会把光标移到末尾、连带把视图滚到最后，
+  // 所以先记住当前滚动位置，插入完成后再恢复回去
+  const scrollTop = el?.scrollTop ?? 0
   content.value = content.value.slice(0, start) + text + content.value.slice(end)
   void nextTick(() => {
-    const el = editorRef.value
-    if (!el) return
-    el.focus()
-    el.setSelectionRange(selectStart, selectEnd)
+    const target = editorRef.value
+    if (!target) return
+    target.focus({ preventScroll: true })
+    target.setSelectionRange(selectStart, selectEnd)
+    target.scrollTop = scrollTop
   })
 }
 
@@ -1268,21 +1273,24 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-/* 预览模式下的目录侧边栏（可收起成窄条） */
+/* 预览模式下的目录侧边栏（可收起成窄条，随窗口变宽：最小 210px，最宽 360px） */
 .md-outline {
-  width: 210px;
-  flex: none;
+  flex: 0 0 18%;
+  min-width: 210px;
+  max-width: 360px;
   display: flex;
   flex-direction: column;
   min-height: 0;
   border-right: 1px solid var(--app-border);
   background: var(--app-panel-muted);
-  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: flex-basis 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
 
 .md-outline.collapsed {
-  width: 34px;
+  flex: 0 0 34px;
+  min-width: 34px;
+  max-width: 34px;
 }
 
 .outline-rail {

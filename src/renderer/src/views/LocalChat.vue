@@ -19,7 +19,7 @@ import {
   Search,
   User
 } from '@element-plus/icons-vue'
-import type { ChatFriend, ChatMessage, ChatPeerStatus, ChatState } from '@shared/types'
+import type { ChatFriend, ChatFriendRequest, ChatMessage, ChatPeerStatus, ChatState } from '@shared/types'
 import { formatBytes } from '../utils/format'
 
 const STATUS_TEXT: Record<ChatPeerStatus, string> = {
@@ -275,13 +275,14 @@ async function refreshAllSilently(): Promise<void> {
 
 const friendDialog = ref(false)
 const editingFriendId = ref('')
-const friendForm = reactive({ ip: '', port: '45871', remark: '' })
+const friendForm = reactive({ ip: '', port: '45871', remark: '', inheritHistory: false })
 
 function openAddFriend(): void {
   editingFriendId.value = ''
   friendForm.ip = ''
   friendForm.port = String(me.value?.port ?? 45871)
   friendForm.remark = ''
+  friendForm.inheritHistory = false
   friendDialog.value = true
 }
 
@@ -290,6 +291,7 @@ function openEditFriend(friend: ChatFriend): void {
   friendForm.ip = friend.ip
   friendForm.port = String(friend.port)
   friendForm.remark = friend.remark
+  friendForm.inheritHistory = false
   friendDialog.value = true
 }
 
@@ -315,12 +317,100 @@ async function submitFriend(): Promise<void> {
       )
       ElMessage.success('好友信息已更新')
     } else {
+      // 现在加好友要对方同意，同意后才会出现在好友列表
       applyState(
-        await window.api.chat.addFriend({ ip, port, remark: friendForm.remark.trim() })
+        await window.api.chat.sendFriendRequest({
+          ip,
+          port,
+          remark: friendForm.remark.trim(),
+          inheritHistory: friendForm.inheritHistory
+        })
       )
-      ElMessage.success('好友已添加，正在探测状态')
+      ElMessage.success('好友申请已发送，等待对方同意')
     }
     friendDialog.value = false
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+/* ---------------------------- 好友申请 ---------------------------- */
+
+const requestDialog = ref(false)
+/** 每条申请「是否继承已有聊天记录」的勾选状态（处理前可改） */
+const inheritFlags = reactive<Record<string, boolean>>({})
+
+const requests = computed(() => state.value?.requests ?? [])
+
+const pendingIncoming = computed(
+  () => requests.value.filter((item) => item.direction === 'in' && item.status === 'pending').length
+)
+
+const sortedRequests = computed(() =>
+  [...requests.value].sort((left, right) => right.createdAt - left.createdAt)
+)
+
+function inheritOf(id: string): boolean {
+  return inheritFlags[id] ?? false
+}
+
+function setInherit(id: string, value: boolean): void {
+  inheritFlags[id] = value
+}
+
+function requestPeerName(request: ChatFriendRequest): string {
+  return request.remark || request.nickname || request.ip
+}
+
+/** 打开「新好友」时顺带补发还没结果的申请，对方若已处理会把结果回执回来 */
+function openRequests(): void {
+  requestDialog.value = true
+  void window.api.chat
+    .resendRequests()
+    .then((next) => applyState(next))
+    .catch(() => undefined)
+}
+
+function requestStatusText(request: ChatFriendRequest): string {
+  switch (request.status) {
+    case 'pending':
+      return request.direction === 'in' ? '等待你处理' : '等待对方同意'
+    case 'accepted':
+      return '已同意'
+    case 'rejected':
+      return '已拒绝'
+    default:
+      return request.message || '发送失败'
+  }
+}
+
+function requestTime(request: ChatFriendRequest): string {
+  const stamp = request.respondedAt || request.createdAt
+  const date = new Date(stamp)
+  return `${date.getMonth() + 1}-${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+async function respondRequest(request: ChatFriendRequest, accepted: boolean): Promise<void> {
+  try {
+    const next = await window.api.chat.respondFriendRequest(request.id, accepted, inheritOf(request.id))
+    applyState(next)
+    if (accepted) {
+      const friend = next.friends.find(
+        (item) => item.id === request.peerId || (item.ip === request.ip && item.port === request.port)
+      )
+      if (friend) currentFriendId.value = friend.id
+      ElMessage.success(inheritOf(request.id) ? '已同意，并继承之前的聊天记录' : '已同意，已建立新的聊天记录')
+    } else {
+      ElMessage.success('已拒绝该好友申请')
+    }
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function dismissRequest(id: string): Promise<void> {
+  try {
+    applyState(await window.api.chat.dismissRequest(id))
   } catch (error) {
     ElMessage.error((error as Error).message)
   }
@@ -329,7 +419,7 @@ async function submitFriend(): Promise<void> {
 async function removeFriend(friend: ChatFriend): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确定删除好友「${friend.remark || friend.nickname || friend.ip}」吗？与该好友的聊天记录会一起删除。`,
+      `确定删除好友「${friend.remark || friend.nickname || friend.ip}」吗？聊天记录会保留，之后重新加为好友时可以选择继承。`,
       '删除好友',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
@@ -613,17 +703,6 @@ async function openChatDir(): Promise<void> {
   }
 }
 
-async function chooseChatDir(): Promise<void> {
-  try {
-    const result = await window.api.chat.chooseChatDir()
-    if (result.canceled) return
-    applyState(await window.api.chat.state())
-    ElMessage.success('聊天文件保存目录已更新')
-  } catch (error) {
-    ElMessage.error((error as Error).message)
-  }
-}
-
 /* ------------------------------ 列表伸缩 ------------------------------ */
 
 let resizing = false
@@ -725,6 +804,11 @@ onUnmounted(() => {
           <el-tooltip :content="state?.listening ? '正在监听端口' : state?.portError || '未启动'" placement="bottom">
             <span class="listen-dot" :class="{ on: state?.listening }" />
           </el-tooltip>
+          <el-tooltip content="聊天文件保存目录" placement="bottom">
+            <button class="mini-btn" type="button" @click="openChatDir">
+              <el-icon :size="13"><FolderOpened /></el-icon>
+            </button>
+          </el-tooltip>
         </div>
 
         <div class="friend-toolbar">
@@ -736,6 +820,11 @@ onUnmounted(() => {
             clearable
             class="friend-search"
           />
+          <el-tooltip :content="`新好友（${pendingIncoming} 个待处理）`" placement="bottom">
+            <el-badge :value="pendingIncoming" :hidden="pendingIncoming === 0" :max="99" class="friend-badge">
+              <el-button size="small" :icon="User" @click="openRequests" />
+            </el-badge>
+          </el-tooltip>
           <el-tooltip content="添加好友" placement="bottom">
             <el-button size="small" :icon="Plus" @click="openAddFriend" />
           </el-tooltip>
@@ -745,7 +834,7 @@ onUnmounted(() => {
           <div v-if="!friends.length" class="friend-empty">
             <el-icon :size="24"><User /></el-icon>
             <span>还没有好友</span>
-            <span class="tip">点右上角「+」填对方的 IP 和端口</span>
+            <span class="tip">点右上角「+」填对方的 IP 和端口，对方同意后就会出现在这里</span>
           </div>
           <div
             v-for="friend in filteredFriends"
@@ -773,19 +862,6 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-
-        <footer class="user-footer">
-          <span class="small muted" :class="{ warn: !state?.listening }">
-            <template v-if="state?.listening">监听中 · {{ state?.me.port }}</template>
-            <template v-else>{{ state?.portError || '未启动监听' }}</template>
-          </span>
-          <span class="spacer" />
-          <el-tooltip content="聊天文件保存目录" placement="top">
-            <button class="mini-btn" type="button" @click="openChatDir">
-              <el-icon :size="13"><FolderOpened /></el-icon>
-            </button>
-          </el-tooltip>
-        </footer>
       </aside>
 
       <div class="resizer" title="拖动调整好友列表宽度" @mousedown.prevent="startResize" />
@@ -877,12 +953,16 @@ onUnmounted(() => {
                         />
                         <div v-else class="image-loading small muted">图片加载中…</div>
                         <div class="media-actions">
-                          <button class="mini-btn" type="button" title="打开" @click="openMessageFile(row.message)">
-                            <el-icon :size="12"><Document /></el-icon>
-                          </button>
-                          <button class="mini-btn" type="button" title="所在文件夹" @click="revealMessageFile(row.message)">
-                            <el-icon :size="12"><FolderOpened /></el-icon>
-                          </button>
+                          <el-tooltip content="打开" placement="top" :show-after="200">
+                            <button class="media-action" type="button" @click="openMessageFile(row.message)">
+                              <el-icon :size="13"><Document /></el-icon>
+                            </button>
+                          </el-tooltip>
+                          <el-tooltip content="定位" placement="top" :show-after="200">
+                            <button class="media-action" type="button" @click="revealMessageFile(row.message)">
+                              <el-icon :size="13"><FolderOpened /></el-icon>
+                            </button>
+                          </el-tooltip>
                         </div>
                       </div>
                     </template>
@@ -897,12 +977,18 @@ onUnmounted(() => {
                             <span v-if="row.message.error" class="file-error">· 发送失败</span>
                           </div>
                         </div>
-                        <button class="mini-btn" type="button" title="打开" @click="openMessageFile(row.message)">
-                          打开
-                        </button>
-                        <button class="mini-btn" type="button" title="所在文件夹" @click="revealMessageFile(row.message)">
-                          定位
-                        </button>
+                      </div>
+                      <div class="media-actions">
+                        <el-tooltip content="打开" placement="top" :show-after="200">
+                          <button class="media-action" type="button" @click="openMessageFile(row.message)">
+                            <el-icon :size="13"><Document /></el-icon>
+                          </button>
+                        </el-tooltip>
+                        <el-tooltip content="定位" placement="top" :show-after="200">
+                          <button class="media-action" type="button" @click="revealMessageFile(row.message)">
+                            <el-icon :size="13"><FolderOpened /></el-icon>
+                          </button>
+                        </el-tooltip>
                       </div>
                     </template>
                   </div>
@@ -937,7 +1023,12 @@ onUnmounted(() => {
               </el-popover>
               <el-tooltip content="发送图片" placement="top">
                 <button class="tool-btn" type="button" @click="pickImage">
-                  <el-icon :size="15"><Document /></el-icon>
+                  <svg class="tool-svg" viewBox="0 0 1024 1024" aria-hidden="true">
+                    <path
+                      d="M938.666667 553.92V768c0 64.8-52.533333 117.333333-117.333334 117.333333H202.666667c-64.8 0-117.333333-52.533333-117.333334-117.333333V256c0-64.8 52.533333-117.333333 117.333334-117.333333h618.666666c64.8 0 117.333333 52.533333 117.333334 117.333333v297.92z m-64-74.624V256a53.333333 53.333333 0 0 0-53.333334-53.333333H202.666667a53.333333 53.333333 0 0 0-53.333334 53.333333v344.48A290.090667 290.090667 0 0 1 192 597.333333a286.88 286.88 0 0 1 183.296 65.845334C427.029333 528.384 556.906667 437.333333 704 437.333333c65.706667 0 126.997333 16.778667 170.666667 41.962667z m0 82.24c-5.333333-8.32-21.130667-21.653333-43.648-32.917333C796.768 511.488 753.045333 501.333333 704 501.333333c-121.770667 0-229.130667 76.266667-270.432 188.693334-2.730667 7.445333-7.402667 20.32-13.994667 38.581333-7.68 21.301333-34.453333 28.106667-51.370666 13.056-16.437333-14.634667-28.554667-25.066667-36.138667-31.146667A222.890667 222.890667 0 0 0 192 661.333333c-14.464 0-28.725333 1.365333-42.666667 4.053334V768a53.333333 53.333333 0 0 0 53.333334 53.333333h618.666666a53.333333 53.333333 0 0 0 53.333334-53.333333V561.525333zM320 480a96 96 0 1 1 0-192 96 96 0 0 1 0 192z m0-64a32 32 0 1 0 0-64 32 32 0 0 0 0 64z"
+                      fill="currentColor"
+                    />
+                  </svg>
                 </button>
               </el-tooltip>
               <el-tooltip content="发送文件" placement="top">
@@ -945,8 +1036,7 @@ onUnmounted(() => {
                   <el-icon :size="15"><FolderOpened /></el-icon>
                 </button>
               </el-tooltip>
-              <span class="spacer" />
-              <span class="small muted">Enter 发送 · Shift + Enter 换行</span>
+              <span class="small muted composer-hint">Enter 发送 · Shift + Enter 换行</span>
             </div>
             <textarea
               v-model="messageText"
@@ -956,9 +1046,6 @@ onUnmounted(() => {
               @keydown="onComposerKeydown"
             />
             <div class="composer-footer">
-              <span class="small muted">聊天文件保存在 {{ state?.chatDir || '-' }}</span>
-              <el-button size="small" text @click="chooseChatDir">修改目录</el-button>
-              <span class="spacer" />
               <el-button type="primary" size="small" :icon="Position" :disabled="!canSend" @click="sendText">
                 发送
               </el-button>
@@ -981,7 +1068,7 @@ onUnmounted(() => {
     <el-dialog
       v-model="friendDialog"
       :title="editingFriendId ? '编辑好友' : '添加好友'"
-      width="420px"
+      width="460px"
       append-to-body
     >
       <div class="form-stack">
@@ -997,11 +1084,66 @@ onUnmounted(() => {
           <span class="form-label">备注</span>
           <el-input v-model="friendForm.remark" placeholder="给这位好友起个名字，例如：隔壁老王" />
         </div>
-        <div class="small muted">对方需要打开本程序并处于同一网络；添加后会自动探测在线状态。</div>
+        <el-checkbox v-if="!editingFriendId" v-model="friendForm.inheritHistory">
+          继承与该好友已有的聊天记录
+        </el-checkbox>
+        <div v-if="!editingFriendId" class="small muted">
+          发送申请后需要对方同意才会出现在好友列表；不勾选「继承」则按新好友处理（从空白记录开始）。
+        </div>
+        <div v-else class="small muted">修改备注只影响本地显示，不会通知对方。</div>
       </div>
       <template #footer>
         <el-button @click="friendDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitFriend">{{ editingFriendId ? '保存' : '添加' }}</el-button>
+        <el-button type="primary" @click="submitFriend">
+          {{ editingFriendId ? '保存' : '发送申请' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 新好友：添加 / 被添加的申请记录 -->
+    <el-dialog v-model="requestDialog" title="新好友" width="560px" append-to-body>
+      <div v-if="!sortedRequests.length" class="request-empty">
+        还没有好友申请。点好友列表右上角的「+」填写对方 IP 与端口即可发起申请。
+      </div>
+      <div v-else class="request-list">
+        <div v-for="request in sortedRequests" :key="request.id" class="request-item">
+          <span class="request-tag" :class="request.direction">
+            {{ request.direction === 'in' ? '添加我' : '我添加' }}
+          </span>
+          <div class="request-main">
+            <div class="request-name">
+              {{ requestPeerName(request) }}
+              <span class="small muted mono">{{ request.ip }}:{{ request.port }}</span>
+            </div>
+            <div class="request-sub small muted">
+              {{ requestStatusText(request) }} · {{ requestTime(request) }}
+              <span v-if="request.inheritHistory" class="request-inherit">· 继承聊天记录</span>
+            </div>
+          </div>
+          <template v-if="request.status === 'pending' && request.direction === 'in'">
+            <el-checkbox
+              :model-value="inheritOf(request.id)"
+              size="small"
+              class="request-check"
+              @update:model-value="(value: unknown) => setInherit(request.id, Boolean(value))"
+            >
+              继承记录
+            </el-checkbox>
+            <el-button size="small" type="primary" @click="respondRequest(request, true)">同意</el-button>
+            <el-button size="small" @click="respondRequest(request, false)">拒绝</el-button>
+          </template>
+          <template v-else>
+            <span class="request-state" :class="request.status">{{ requestStatusText(request) }}</span>
+            <el-tooltip v-if="request.status !== 'pending'" content="从列表中移除这条记录" placement="top">
+              <button class="mini-btn" type="button" @click="dismissRequest(request.id)">
+                <el-icon :size="13"><Delete /></el-icon>
+              </button>
+            </el-tooltip>
+          </template>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="requestDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1137,11 +1279,16 @@ onUnmounted(() => {
 .me-info {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  /* 昵称与 IP:PORT 之间的行距拉开一点，两行更好区分 */
+  gap: 5px;
 }
 
 .me-name {
   font-size: 13.5px;
   font-weight: 600;
+  line-height: 1.35;
   color: var(--app-text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1150,6 +1297,7 @@ onUnmounted(() => {
 
 .me-addr {
   font-size: 11px;
+  line-height: 1.45;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1180,6 +1328,10 @@ onUnmounted(() => {
 .friend-search {
   flex: 1;
   min-width: 0;
+}
+
+.friend-badge :deep(.el-badge__content) {
+  z-index: 2;
 }
 
 .friend-list {
@@ -1296,20 +1448,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.user-footer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  padding: 7px 10px;
-  border-top: 1px solid var(--app-border);
-  background: var(--app-panel-muted);
-}
-
-.user-footer .warn {
-  color: #d97706;
 }
 
 .resizer {
@@ -1501,10 +1639,41 @@ onUnmounted(() => {
   padding: 18px 24px;
 }
 
+/* 图片与文件消息共用同一套「打开 / 定位」按钮 */
 .media-actions {
   display: flex;
   gap: 4px;
   justify-content: flex-end;
+  margin-top: 6px;
+}
+
+/* 只保留图标，鼠标悬停时用 tooltip 显示「打开 / 定位」 */
+.media-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.media-action:hover {
+  background: rgba(47, 111, 237, 0.2);
+}
+
+/* 自己发出的蓝色气泡上用半透明白，保证对比度 */
+.message-row.out .media-action {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.message-row.out .media-action:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 
 .file-box {
@@ -1579,6 +1748,27 @@ onUnmounted(() => {
   font-size: 15px;
 }
 
+/* 发送图片按钮用的是图片图标，颜色跟发送文件一致（跟随 currentColor） */
+.tool-svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: currentColor;
+}
+
+.composer-hint {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+/* 发送按钮固定在输入框右下角 */
+.composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .emoji-grid {
   display: grid;
   grid-template-columns: repeat(10, 1fr);
@@ -1615,13 +1805,6 @@ onUnmounted(() => {
 .composer-input:focus {
   border-color: var(--app-primary);
   background: var(--app-panel);
-}
-
-.composer-footer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
 }
 
 .chat-empty {
@@ -1695,5 +1878,96 @@ onUnmounted(() => {
 .avatar-actions {
   display: flex;
   gap: 8px;
+}
+
+/* ---------------------------- 新好友申请 ---------------------------- */
+.request-empty {
+  padding: 18px 4px;
+  color: var(--app-text-3);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.request-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.request-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel);
+}
+
+.request-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 17px;
+  color: #fff;
+}
+
+.request-tag.in {
+  background: #16a34a;
+}
+
+.request-tag.out {
+  background: #2f6fed;
+}
+
+.request-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.request-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--app-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+}
+
+.request-inherit {
+  color: var(--app-primary);
+}
+
+.request-check {
+  flex: none;
+  margin-right: 2px;
+}
+
+.request-state {
+  flex: none;
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+
+.request-state.accepted {
+  color: #16a34a;
+}
+
+.request-state.rejected {
+  color: #dc2626;
+}
+
+.request-state.failed {
+  color: #d97706;
 }
 </style>

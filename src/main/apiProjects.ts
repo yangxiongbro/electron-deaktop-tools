@@ -239,6 +239,7 @@ function normalizeRecord(value: unknown, fallbackName: string, now: number): Api
     body: normalizeBody(value.body),
     options: normalizeOptions(value.options),
     folderId: str(value.folderId) || null,
+    order: optionalNumber(value.order),
     lastStatus: optionalNumber(value.lastStatus),
     lastOk: typeof value.lastOk === 'boolean' ? value.lastOk : undefined,
     lastDurationMs: optionalNumber(value.lastDurationMs),
@@ -256,8 +257,23 @@ function normalizeFolder(value: unknown, now: number): ApiFolder | null {
     id: str(value.id) || newFolderId(),
     name,
     parentId: str(value.parentId) || null,
+    order: optionalNumber(value.order),
     createdAt: num(value.createdAt, now),
     updatedAt: num(value.updatedAt, now)
+  }
+}
+
+/** 老数据没有 order 字段：按创建时间补一个稳定顺序，之后由用户拖拽调整 */
+function assignMissingOrder<T extends { order?: number; createdAt: number }>(items: T[]): void {
+  const sorted = [...items].sort((left, right) => left.createdAt - right.createdAt)
+  let next = 1
+  for (const item of sorted) {
+    if (item.order === undefined) {
+      item.order = next
+      next += 1
+    } else {
+      next = Math.max(next, item.order + 1)
+    }
   }
 }
 
@@ -288,6 +304,8 @@ function normalizeProject(value: unknown, index: number, now: number): ApiProjec
   for (const record of requests) {
     if (record.folderId && !folderIds.has(record.folderId)) record.folderId = null
   }
+  assignMissingOrder(folders)
+  assignMissingOrder(requests)
 
   return {
     id: str(value.id) || newProjectId(),
@@ -351,6 +369,7 @@ function normalizeDraft(draft: ApiRequestDraft, now: number): ApiRequestRecord {
     body: normalizeBody(raw.body),
     options: normalizeOptions(raw.options),
     folderId: str(raw.folderId) || null,
+    order: optionalNumber(raw.order),
     lastStatus: optionalNumber(raw.lastStatus),
     lastOk: typeof raw.lastOk === 'boolean' ? raw.lastOk : undefined,
     lastDurationMs: optionalNumber(raw.lastDurationMs),
@@ -600,6 +619,8 @@ export async function saveRequest(
       id: existing.id,
       createdAt: existing.createdAt,
       updatedAt: now,
+      // 手动顺序由「拖拽排序」维护，保存草稿时保持原位置
+      order: existing.order,
       lastStatus: normalized.lastStatus ?? existing.lastStatus,
       lastOk: normalized.lastOk ?? existing.lastOk,
       lastDurationMs: normalized.lastDurationMs ?? existing.lastDurationMs,
@@ -607,7 +628,10 @@ export async function saveRequest(
     }
     project.requests[index] = record
   } else {
-    record = { ...normalized, id: newRequestId(), createdAt: now, updatedAt: now }
+    // 新请求排在所属层级的手动顺序末尾
+    const siblings = project.requests.filter((item) => (item.folderId ?? null) === (normalized.folderId ?? null))
+    const nextOrder = siblings.reduce((max, item) => Math.max(max, item.order ?? 0), 0) + 1
+    record = { ...normalized, id: newRequestId(), order: nextOrder, createdAt: now, updatedAt: now }
     project.requests.unshift(record)
     if (project.requests.length > MAX_REQUESTS_PER_PROJECT) {
       project.requests
@@ -662,10 +686,13 @@ export async function createFolder(
   }
 
   const now = Date.now()
+  const siblingFolders = project.folders.filter((item) => (item.parentId ?? null) === parentKey)
+  const nextOrder = siblingFolders.reduce((max, item) => Math.max(max, item.order ?? 0), 0) + 1
   project.folders.push({
     id: newFolderId(),
     name: folderName,
     parentId: parentKey,
+    order: nextOrder,
     createdAt: now,
     updatedAt: now
   })
@@ -728,11 +755,73 @@ export async function moveRequest(
   if (!record) throw new Error('请求不存在或已被删除')
 
   if (folderId) requireFolder(project, folderId)
-  record.folderId = folderId || null
+  const targetKey = folderId || null
+  if ((record.folderId ?? null) !== targetKey) {
+    // 换文件夹后放到目标层级末尾
+    const siblings = project.requests.filter(
+      (item) => item.id !== record.id && (item.folderId ?? null) === targetKey
+    )
+    record.order = siblings.reduce((max, item) => Math.max(max, item.order ?? 0), 0) + 1
+  }
+  record.folderId = targetKey
   record.updatedAt = Date.now()
   project.updatedAt = record.updatedAt
   await persist(projects)
   return projects
+}
+
+/** 手动排序：按传入顺序给同一层级下的请求重新编号 */
+export async function reorderRequests(
+  projectId: string,
+  folderId: string | null,
+  orderedIds: string[]
+): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  const parentKey = folderId || null
+  applyOrder(
+    project.requests.filter((item) => (item.folderId ?? null) === parentKey),
+    orderedIds
+  )
+  project.updatedAt = Date.now()
+  await persist(projects)
+  return projects
+}
+
+/** 手动排序：按传入顺序给同一层级下的文件夹重新编号 */
+export async function reorderFolders(
+  projectId: string,
+  parentId: string | null,
+  orderedIds: string[]
+): Promise<ApiProject[]> {
+  const projects = await loadProjects()
+  const project = requireProject(projects, projectId)
+  const parentKey = parentId || null
+  applyOrder(
+    project.folders.filter((item) => (item.parentId ?? null) === parentKey),
+    orderedIds
+  )
+  project.updatedAt = Date.now()
+  await persist(projects)
+  return projects
+}
+
+/** 把 orderedIds 里的顺序写成 0..n-1，没列到的排在最后 */
+function applyOrder(items: { id: string; order?: number }[], orderedIds: string[]): void {
+  const listed = new Set<string>()
+  let index = 0
+  for (const id of orderedIds) {
+    const item = items.find((entry) => entry.id === id)
+    if (!item || listed.has(id)) continue
+    item.order = index
+    listed.add(id)
+    index += 1
+  }
+  for (const item of items) {
+    if (listed.has(item.id)) continue
+    item.order = index
+    index += 1
+  }
 }
 
 export async function recordResult(

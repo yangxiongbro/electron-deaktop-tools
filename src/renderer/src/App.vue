@@ -8,6 +8,9 @@ const { settings } = useSettings()
 
 const currentId = ref('json')
 
+/** Windows 上用了自定义标题栏，右上角要给系统窗口按钮留出位置 */
+const isWindowsCustomTitleBar = window.api.platform === 'win32'
+
 const currentTool = computed(() => TOOLS.find((tool) => tool.id === currentId.value) ?? TOOLS[0])
 const isDark = computed(() => settings.theme === 'dark')
 /** 工具列表（不含设置）与设置项分开渲染：设置固定放在侧边栏底部 */
@@ -45,7 +48,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'custom-titlebar': isWindowsCustomTitleBar }">
     <AppSidebar
       :tools="toolList"
       :settings-tool="settingsTool"

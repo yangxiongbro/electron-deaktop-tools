@@ -41,6 +41,8 @@ import {
   removeRequest,
   renameFolder,
   renameProject,
+  reorderFolders,
+  reorderRequests,
   saveRequest
 } from './apiProjects'
 import {
@@ -48,11 +50,15 @@ import {
   chatDataFile,
   chatState,
   clearHistory,
+  dismissRequest,
   readImageDataUrl,
   refreshAllFriends,
   refreshFriend,
   removeFriend,
+  resendPendingRequests,
+  respondFriendRequest,
   sendFile,
+  sendFriendRequest,
   sendImage,
   sendText,
   setChatDir,
@@ -60,6 +66,7 @@ import {
   updateProfile
 } from './chat'
 import { configDir, defaultDownloadDir, loadSettings, settingsFile, updateSettings } from './store'
+import { applyWindowChrome } from './windowChrome'
 import type { HttpRequestConfig } from '@shared/types'
 
 const MAX_TEXT_FILE_BYTES = 32 * 1024 * 1024
@@ -87,6 +94,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('settings:update', async (_event: IpcMainInvokeEvent, patch: Partial<AppSettings>) => {
     const next = await updateSettings(patch ?? {})
     for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) applyWindowChrome(win, next.theme)
       win.webContents.send('settings:changed', next)
     }
     return next
@@ -275,6 +283,18 @@ export function registerIpcHandlers(): void {
     removeFolder(projectId, folderId)
   )
 
+  ipcMain.handle(
+    'projects:reorder-requests',
+    (_event, projectId: string, folderId: string | null, orderedIds: string[]) =>
+      reorderRequests(projectId, folderId ?? null, Array.isArray(orderedIds) ? orderedIds : [])
+  )
+
+  ipcMain.handle(
+    'projects:reorder-folders',
+    (_event, projectId: string, parentId: string | null, orderedIds: string[]) =>
+      reorderFolders(projectId, parentId ?? null, Array.isArray(orderedIds) ? orderedIds : [])
+  )
+
   ipcMain.handle('projects:move-request', (_event, projectId: string, requestId: string, folderId: string | null) =>
     moveRequest(projectId, requestId, folderId ?? null)
   )
@@ -386,6 +406,18 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.handle('chat:add-friend', (_event, input: ChatFriendInput) => addFriend(input))
+
+  ipcMain.handle('chat:send-friend-request', (_event, input: ChatFriendInput) => sendFriendRequest(input))
+
+  ipcMain.handle(
+    'chat:respond-friend-request',
+    (_event, id: string, accepted: boolean, inheritHistory: boolean) =>
+      respondFriendRequest(id, Boolean(accepted), Boolean(inheritHistory))
+  )
+
+  ipcMain.handle('chat:dismiss-request', (_event, id: string) => dismissRequest(id))
+
+  ipcMain.handle('chat:resend-requests', () => resendPendingRequests())
 
   ipcMain.handle('chat:update-friend', (_event, id: string, patch: Partial<ChatFriendInput>) =>
     updateFriend(id, patch ?? {})

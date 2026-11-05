@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc'
 import { bootstrapChat, stopChatServer } from './chat'
 import { loadSettings } from './store'
+import { titleBarOverlay } from './windowChrome'
 import { setupSmokeCapture } from './smoke'
 
 const APP_ID = 'com.electron.deaktoptools'
@@ -47,6 +48,10 @@ function createWindow(): BrowserWindow {
     autoHideMenuBar: true,
     title: 'DevToolbox 开发工具箱',
     icon: existsSync(iconPath) ? iconPath : undefined,
+    // Windows：隐藏系统标题栏（去掉左上角的程序图标与名称），保留右上角窗口按钮
+    ...(process.platform === 'win32'
+      ? { titleBarStyle: 'hidden' as const, titleBarOverlay: titleBarOverlay(settings.theme) }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,

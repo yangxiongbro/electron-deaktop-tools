@@ -7,10 +7,12 @@ import { basename, dirname, extname, join } from 'node:path'
 import type {
   ChatFriend,
   ChatFriendInput,
+  ChatFriendRequest,
   ChatMessage,
   ChatMessageKind,
   ChatPeerStatus,
   ChatProfile,
+  ChatRequestStatus,
   ChatState
 } from '@shared/types'
 import { configDir } from './store'
@@ -29,6 +31,7 @@ const APP_MARKER = 'devtoolbox-chat'
 /** 默认端口：挑一个少见、不与常见服务冲突的端口 */
 export const DEFAULT_CHAT_PORT = 45871
 const MAX_MESSAGES = 1000
+const MAX_REQUESTS = 100
 const MAX_TEXT_LENGTH = 20000
 const MAX_FILE_BYTES = 16 * 1024 * 1024
 const MAX_BODY_BYTES = 24 * 1024 * 1024
@@ -36,6 +39,8 @@ const MAX_BODY_BYTES = 24 * 1024 * 1024
 interface ChatStore {
   me: ChatProfile
   friends: ChatFriend[]
+  /** 好友申请记录 */
+  requests: ChatFriendRequest[]
   messages: ChatMessage[]
   /** 图片 / 文件的保存目录 */
   chatDir: string
@@ -190,8 +195,35 @@ function createDefaultStore(): ChatStore {
       host: localAddress()
     },
     friends: [],
+    requests: [],
     messages: [],
     chatDir: defaultChatDir()
+  }
+}
+
+function normalizeRequest(value: unknown, now: number): ChatFriendRequest | null {
+  if (!isObject(value)) return null
+  const ip = str(value.ip).trim()
+  if (!ip) return null
+  const status: ChatRequestStatus =
+    value.status === 'accepted' || value.status === 'rejected' || value.status === 'failed'
+      ? value.status
+      : 'pending'
+  return {
+    id: str(value.id) || `req-${randomSuffix()}`,
+    remoteId: str(value.remoteId),
+    direction: value.direction === 'out' ? 'out' : 'in',
+    peerId: str(value.peerId),
+    nickname: str(value.nickname).slice(0, 40),
+    avatar: str(value.avatar),
+    ip,
+    port: clamp(Math.round(num(value.port, DEFAULT_CHAT_PORT)), 1, 65535),
+    remark: str(value.remark).slice(0, 40),
+    inheritHistory: Boolean(value.inheritHistory),
+    status,
+    createdAt: num(value.createdAt, now),
+    respondedAt: num(value.respondedAt, 0),
+    message: str(value.message).slice(0, 120)
   }
 }
 
@@ -219,13 +251,18 @@ function normalizeFriend(value: unknown, now: number): ChatFriend | null {
   if (!isObject(value)) return null
   const ip = str(value.ip).trim()
   if (!ip) return null
+  const port = clamp(Math.round(num(value.port, DEFAULT_CHAT_PORT)), 1, 65535)
+  const nickname = str(value.nickname).slice(0, 40)
+  let remark = str(value.remark).slice(0, 40)
+  // 旧版本在没填备注时会把 IP 当作备注存下来；已知对方昵称时清掉，界面就能显示昵称
+  if (nickname && (remark === ip || remark === `${ip}:${port}`)) remark = ''
   const status = value.status === 'online' || value.status === 'unreachable' ? value.status : 'offline'
   return {
     id: str(value.id) || `f-${randomSuffix()}`,
-    remark: str(value.remark).slice(0, 40),
+    remark,
     ip,
-    port: clamp(Math.round(num(value.port, DEFAULT_CHAT_PORT)), 1, 65535),
-    nickname: str(value.nickname).slice(0, 40),
+    port,
+    nickname,
     avatar: str(value.avatar),
     status,
     lastSeenAt: num(value.lastSeenAt, 0),
@@ -268,9 +305,17 @@ function normalizeStore(raw: unknown): ChatStore {
         .filter((item): item is ChatMessage => item !== null)
     : []
 
+  const requests = Array.isArray(raw.requests)
+    ? raw.requests
+        .map((item) => normalizeRequest(item, now))
+        .filter((item): item is ChatFriendRequest => item !== null)
+        .slice(-MAX_REQUESTS)
+    : []
+
   return {
     me,
     friends: uniqueFriends.slice(0, 200),
+    requests,
     messages: messages.slice(-MAX_MESSAGES),
     chatDir: str(raw.chatDir) || base.chatDir
   }
@@ -294,6 +339,7 @@ async function persist(): Promise<void> {
     updatedAt: Date.now(),
     me: cache.me,
     friends: cache.friends,
+    requests: cache.requests,
     messages: cache.messages,
     chatDir: cache.chatDir
   }
@@ -333,6 +379,7 @@ export function chatStateSync(): ChatState {
   return {
     me: { ...store.me, host: localAddress() },
     friends: store.friends.map((item) => ({ ...item })),
+    requests: store.requests.map((item) => ({ ...item })),
     messages: store.messages.map((item) => ({ ...item })),
     dataFile: chatDataFile(),
     chatDir: store.chatDir,
@@ -441,6 +488,24 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return
       }
       await receiveMessage(from, remoteIp, body.payload)
+      sendJson(res, 200, { ok: true })
+      return
+    }
+    case 'friend-request': {
+      if (!isObject(body.payload)) {
+        sendJson(res, 400, { ok: false, error: 'bad payload' })
+        return
+      }
+      await receiveFriendRequest(from, remoteIp, body.payload)
+      sendJson(res, 200, { ok: true })
+      return
+    }
+    case 'friend-request-result': {
+      if (!isObject(body.payload)) {
+        sendJson(res, 400, { ok: false, error: 'bad payload' })
+        return
+      }
+      await applyFriendRequestResult(from, remoteIp, body.payload)
       sendJson(res, 200, { ok: true })
       return
     }
@@ -564,19 +629,17 @@ function postJson(
   })
 }
 
-/** 探测好友：先看端口通不通，再看对面是不是本程序 */
-async function probeFriend(friend: ChatFriend): Promise<{ status: ChatPeerStatus; profile: PeerBrief | null }> {
-  const reachable = await tcpReachable(friend.ip, friend.port)
+/** 探测某个地址：先看端口通不通，再看对面是不是本程序 */
+async function probePeer(
+  ip: string,
+  port: number
+): Promise<{ status: ChatPeerStatus; profile: PeerBrief | null }> {
+  const reachable = await tcpReachable(ip, port)
   if (!reachable) return { status: 'unreachable', profile: null }
 
   try {
     const store = await loadStore()
-    const res = await postJson(
-      friend.ip,
-      friend.port,
-      { action: 'ping', from: peerBrief(store.me) },
-      2000
-    )
+    const res = await postJson(ip, port, { action: 'ping', from: peerBrief(store.me) }, 2000)
     if (res.json && res.json.app === APP_MARKER && isObject(res.json.profile)) {
       const profile = res.json.profile
       return {
@@ -585,7 +648,7 @@ async function probeFriend(friend: ChatFriend): Promise<{ status: ChatPeerStatus
           id: str(profile.id),
           nickname: str(profile.nickname).slice(0, 40),
           avatar: str(profile.avatar),
-          port: clamp(Math.round(num(profile.port, friend.port)), 1, 65535)
+          port: clamp(Math.round(num(profile.port, port)), 1, 65535)
         }
       }
     }
@@ -614,7 +677,7 @@ function matchFriend(store: ChatStore, from: PeerBrief, remoteIp: string): ChatF
 }
 
 async function refreshFriendRecord(friend: ChatFriend): Promise<ChatFriend> {
-  const result = await probeFriend(friend)
+  const result = await probePeer(friend.ip, friend.port)
   friend.status = result.status
   friend.updatedAt = Date.now()
   if (result.status === 'online') {
@@ -671,7 +734,8 @@ export async function addFriend(input: ChatFriendInput): Promise<ChatState> {
   const now = Date.now()
   const friend: ChatFriend = {
     id: `f-${randomSuffix()}`,
-    remark: str(input?.remark).trim().slice(0, 40) || ip,
+    // 备注留空时不要拿 IP 顶上：界面会退回显示对方的昵称
+    remark: str(input?.remark).trim().slice(0, 40),
     ip,
     port,
     nickname: '',
@@ -688,12 +752,391 @@ export async function addFriend(input: ChatFriendInput): Promise<ChatState> {
   return chatStateSync()
 }
 
+/* ---------------------------- 好友申请 ---------------------------- */
+
+interface PeerInfo {
+  peerId: string
+  nickname: string
+  avatar: string
+  ip: string
+  port: number
+  remark: string
+}
+
+/**
+ * 把申请通过的好友落到好友列表。
+ * inheritHistory 为 false 时当作全新好友：清掉与该对端已有的聊天记录。
+ */
+function createFriendFromPeer(store: ChatStore, peer: PeerInfo, inheritHistory: boolean): ChatFriend {
+  const now = Date.now()
+  const existing = store.friends.find(
+    (item) => (peer.peerId && item.id === peer.peerId) || (item.ip === peer.ip && item.port === peer.port)
+  )
+
+  if (!inheritHistory) {
+    // 不继承：把这个对端的历史记录清掉（旧好友 id 与对方稳定 id 都算）
+    const doomed = new Set<string>([peer.peerId])
+    if (existing) doomed.add(existing.id)
+    store.messages = store.messages.filter((item) => !doomed.has(item.friendId))
+    if (existing) store.friends = store.friends.filter((item) => item.id !== existing.id)
+  } else if (existing) {
+    // 继承：复用原来的好友 id，历史消息自然还在
+    existing.ip = peer.ip
+    existing.port = peer.port
+    if (peer.nickname) existing.nickname = peer.nickname
+    if (peer.avatar) existing.avatar = peer.avatar
+    if (!existing.remark && peer.remark) existing.remark = peer.remark
+    existing.status = 'online'
+    existing.lastSeenAt = now
+    existing.updatedAt = now
+    return existing
+  }
+
+  // 对端稳定 id 作为好友 id：删掉再加时，「继承记录」仍然能对上同一份历史
+  const friend: ChatFriend = {
+    id: peer.peerId || `f-${randomSuffix()}`,
+    remark: peer.remark,
+    ip: peer.ip,
+    port: peer.port,
+    nickname: peer.nickname,
+    avatar: peer.avatar,
+    status: 'online',
+    lastSeenAt: now,
+    createdAt: now,
+    updatedAt: now
+  }
+  store.friends.push(friend)
+  return friend
+}
+
+function pruneRequests(store: ChatStore): void {
+  if (store.requests.length > MAX_REQUESTS) {
+    store.requests = store.requests.slice(-MAX_REQUESTS)
+  }
+}
+
+/**
+ * 发起好友申请。对方必须在线（能收到申请），同意后才会出现在自己的好友列表里。
+ */
+export async function sendFriendRequest(input: ChatFriendInput): Promise<ChatState> {
+  const store = await loadStore()
+  const ip = normalizeIp(str(input?.ip))
+  const port = clamp(Math.round(num(input?.port, DEFAULT_CHAT_PORT)), 1, 65535)
+  if (!ip) throw new Error('好友 IP 不能为空')
+  if (!/^[0-9a-zA-Z.:-]+$/.test(ip)) throw new Error('好友 IP 格式不正确')
+  if (ip === localAddress() && port === store.me.port) throw new Error('不能添加自己为好友')
+  if (store.friends.some((item) => item.ip === ip && item.port === port)) {
+    throw new Error(`${ip}:${port} 已经是你的好友了`)
+  }
+  if (
+    store.requests.some(
+      (item) => item.direction === 'out' && item.status === 'pending' && item.ip === ip && item.port === port
+    )
+  ) {
+    throw new Error('已经发过申请了，等对方同意即可')
+  }
+
+  const probe = await probePeer(ip, port)
+  if (probe.status !== 'online' || !probe.profile) {
+    throw new Error('对方当前不在线（或端口不通），无法发送好友申请')
+  }
+
+  const now = Date.now()
+  const request: ChatFriendRequest = {
+    id: `req-${randomSuffix()}`,
+    remoteId: '',
+    direction: 'out',
+    peerId: probe.profile.id,
+    nickname: probe.profile.nickname,
+    avatar: probe.profile.avatar,
+    ip,
+    port,
+    remark: str(input?.remark).trim().slice(0, 40),
+    inheritHistory: Boolean(input?.inheritHistory),
+    status: 'pending',
+    createdAt: now,
+    respondedAt: 0,
+    message: ''
+  }
+  store.requests.push(request)
+  pruneRequests(store)
+  await persist()
+  broadcastState()
+
+  try {
+    await postJson(
+      ip,
+      port,
+      {
+        action: 'friend-request',
+        from: peerBrief(store.me),
+        payload: {
+          requestId: request.id,
+          remark: request.remark,
+          inheritHistory: request.inheritHistory
+        }
+      },
+      8000
+    )
+  } catch (error) {
+    request.status = 'failed'
+    request.message = `申请没有送达：${(error as Error).message}`
+    await persist()
+    broadcastState()
+    throw new Error(request.message)
+  }
+
+  broadcastState()
+  return chatStateSync()
+}
+
+/** 收到别人发来的好友申请：先记下来，由用户决定同意 / 拒绝 */
+async function receiveFriendRequest(
+  from: PeerBrief,
+  remoteIp: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const store = await loadStore()
+  const ip = remoteIp || localAddress()
+  const port = clamp(Math.round(num(payload.port ?? from.port, DEFAULT_CHAT_PORT)), 1, 65535)
+  const remark = str(payload.remark).slice(0, 40)
+  const inheritHistory = Boolean(payload.inheritHistory)
+  /** 对方的申请 id —— 回执时必须原样带上，对方才能对上自己的记录 */
+  const remoteId = str(payload.requestId)
+  const now = Date.now()
+
+  // 已经是好友时直接回执「已同意」，省得对方一直等
+  const already = store.friends.find(
+    (item) => (from.id && item.id === from.id) || (item.ip === ip && item.port === port)
+  )
+  if (already) {
+    if (remoteId) await replyFriendRequest(already.ip, already.port, remoteId, true, false)
+    return
+  }
+
+  // 之前已经处理过「同一条申请」：把结果再回执一次（对方上次可能没收到）。
+  // 注意只认同一条申请（remoteId 相同），否则对方被拒之后重新申请就不会产生新记录了。
+  const decided = remoteId
+    ? store.requests.find((item) => item.direction === 'in' && item.remoteId && item.remoteId === remoteId)
+    : null
+  if (decided && decided.status !== 'pending' && now - decided.respondedAt < 24 * 60 * 60 * 1000) {
+    void replyFriendRequest(
+      decided.ip,
+      decided.port,
+      remoteId,
+      decided.status === 'accepted',
+      decided.inheritHistory
+    )
+    return
+  }
+
+  const existing = store.requests.find(
+    (item) =>
+      item.direction === 'in' &&
+      item.status === 'pending' &&
+      ((from.id && item.peerId === from.id) || (item.ip === ip && item.port === port))
+  )
+  let created = false
+  if (existing) {
+    existing.createdAt = now
+    existing.nickname = from.nickname || existing.nickname
+    existing.avatar = from.avatar || existing.avatar
+    existing.remark = remark || existing.remark
+    existing.inheritHistory = inheritHistory
+    existing.remoteId = remoteId || existing.remoteId
+  } else {
+    store.requests.push({
+      id: `req-${randomSuffix()}`,
+      remoteId,
+      direction: 'in',
+      peerId: from.id,
+      nickname: from.nickname,
+      avatar: from.avatar,
+      ip,
+      port: from.port || port,
+      remark,
+      inheritHistory,
+      status: 'pending',
+      createdAt: now,
+      respondedAt: 0,
+      message: ''
+    })
+    pruneRequests(store)
+    created = true
+  }
+
+  await persist()
+  broadcastState()
+  // 重复推送（对方在等结果时的补发）不再重复弹通知
+  if (created) notifyFriendRequest(from)
+}
+
+/** 别人添加我：同意 / 拒绝 */
+export async function respondFriendRequest(
+  id: string,
+  accepted: boolean,
+  inheritHistory: boolean
+): Promise<ChatState> {
+  const store = await loadStore()
+  const request = store.requests.find((item) => item.id === id && item.direction === 'in')
+  if (!request) throw new Error('申请不存在或已被删除')
+  if (request.status !== 'pending') throw new Error('这条申请已经处理过了')
+
+  request.status = accepted ? 'accepted' : 'rejected'
+  request.respondedAt = Date.now()
+  request.inheritHistory = inheritHistory
+  request.message = accepted ? (inheritHistory ? '已同意并继承聊天记录' : '已同意，新建聊天记录') : '已拒绝'
+
+  if (accepted) {
+    createFriendFromPeer(
+      store,
+      {
+        peerId: request.peerId,
+        nickname: request.nickname,
+        avatar: request.avatar,
+        ip: request.ip,
+        port: request.port,
+        remark: request.remark
+      },
+      inheritHistory
+    )
+  }
+
+  await persist()
+  // 先刷新界面，再把结果回执给对方（对方离线时回执可能很慢，不能挡住界面）
+  broadcastState()
+  // 用对方那条申请的 id 回执，对方才能对上自己的记录
+  void replyFriendRequest(request.ip, request.port, request.remoteId, accepted, inheritHistory)
+  return chatStateSync()
+}
+
+/** 把同意 / 拒绝的结果发回给申请方 */
+async function replyFriendRequest(
+  ip: string,
+  port: number,
+  requestId: string,
+  accepted: boolean,
+  inheritHistory: boolean
+): Promise<void> {
+  const store = await loadStore()
+  if (!requestId) return
+  try {
+    await postJson(
+      ip,
+      port,
+      {
+        action: 'friend-request-result',
+        from: peerBrief(store.me),
+        payload: { requestId, accepted, inheritHistory }
+      },
+      5000
+    )
+  } catch (error) {
+    console.error('[chat] 回执好友申请失败', error)
+  }
+}
+
+/** 收到别人对我申请的处理结果 */
+async function applyFriendRequestResult(
+  from: PeerBrief,
+  remoteIp: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const store = await loadStore()
+  const requestId = str(payload.requestId)
+  const accepted = Boolean(payload.accepted)
+  const request = store.requests.find((item) => item.id === requestId && item.direction === 'out')
+
+  // 已经处理过这条申请：忽略重复回执
+  if (request && request.status !== 'pending') return
+
+  const peer: PeerInfo = {
+    peerId: from.id || request?.peerId || '',
+    nickname: from.nickname || request?.nickname || '',
+    avatar: from.avatar || request?.avatar || '',
+    ip: remoteIp || request?.ip || '',
+    port: clamp(Math.round(num(from.port || request?.port, DEFAULT_CHAT_PORT)), 1, 65535),
+    remark: request?.remark || ''
+  }
+  if (!peer.ip) return
+
+  if (request) {
+    request.status = accepted ? 'accepted' : 'rejected'
+    request.respondedAt = Date.now()
+    request.message = accepted ? '对方已同意' : '对方已拒绝'
+  } else if (accepted) {
+    // 本地已经没有这条申请（例如记录被清理过）：对方说同意了，照样把好友加回来
+    store.requests.push({
+      id: requestId || `req-${randomSuffix()}`,
+      remoteId: '',
+      direction: 'out',
+      peerId: peer.peerId,
+      nickname: peer.nickname,
+      avatar: peer.avatar,
+      ip: peer.ip,
+      port: peer.port,
+      remark: '',
+      inheritHistory: true,
+      status: 'accepted',
+      createdAt: Date.now(),
+      respondedAt: Date.now(),
+      message: '对方已同意'
+    })
+    pruneRequests(store)
+  } else {
+    return
+  }
+
+  if (accepted) {
+    createFriendFromPeer(store, peer, request ? request.inheritHistory : true)
+  }
+
+  await persist()
+  broadcastState()
+}
+
+/**
+ * 重新推送还没有结果的申请。
+ * 对方已经处理过的话，会直接把同意 / 拒绝的结果回执回来，
+ * 用来兜住「对方点了同意但回执丢了」的情况。
+ */
+export async function resendPendingRequests(): Promise<ChatState> {
+  const store = await loadStore()
+  const pending = store.requests.filter((item) => item.direction === 'out' && item.status === 'pending')
+  if (!pending.length) return chatStateSync()
+
+  await Promise.all(
+    pending.map(async (request) => {
+      try {
+        await postJson(
+          request.ip,
+          request.port,
+          {
+            action: 'friend-request',
+            from: peerBrief(store.me),
+            payload: {
+              requestId: request.id,
+              remark: request.remark,
+              inheritHistory: request.inheritHistory
+            }
+          },
+          4000
+        )
+      } catch {
+        // 对方不在线就算了，下次打开「新好友」再试
+      }
+    })
+  )
+  return chatStateSync()
+}
+
 export async function updateFriend(id: string, patch: Partial<ChatFriendInput>): Promise<ChatState> {
   const store = await loadStore()
   const friend = store.friends.find((item) => item.id === id)
   if (!friend) throw new Error('好友不存在')
 
-  if (patch.remark !== undefined) friend.remark = str(patch.remark).trim().slice(0, 40) || friend.ip
+  // 备注可以清空，清空后界面展示对方昵称
+  if (patch.remark !== undefined) friend.remark = str(patch.remark).trim().slice(0, 40)
   if (patch.ip !== undefined) {
     const ip = normalizeIp(str(patch.ip))
     if (!ip) throw new Error('好友 IP 不能为空')
@@ -711,7 +1154,16 @@ export async function updateFriend(id: string, patch: Partial<ChatFriendInput>):
 export async function removeFriend(id: string): Promise<ChatState> {
   const store = await loadStore()
   store.friends = store.friends.filter((item) => item.id !== id)
-  store.messages = store.messages.filter((item) => item.friendId !== id)
+  // 聊天记录先留着：以后重新加好友时可以选择「继承已有的聊天记录」
+  await persist()
+  broadcastState()
+  return chatStateSync()
+}
+
+/** 删除一条好友申请记录（只是清列表，不影响好友关系） */
+export async function dismissRequest(id: string): Promise<ChatState> {
+  const store = await loadStore()
+  store.requests = store.requests.filter((item) => item.id !== id)
   await persist()
   broadcastState()
   return chatStateSync()
@@ -881,6 +1333,19 @@ function notifyIncoming(message: ChatMessage, friend: ChatFriend): void {
     new Notification({ title, body }).show()
   } catch (error) {
     console.error('[chat] 发送系统通知失败', error)
+  }
+}
+
+/** 有人加你为好友时弹个系统通知 */
+function notifyFriendRequest(from: PeerBrief): void {
+  if (!Notification.isSupported()) return
+  try {
+    new Notification({
+      title: '新的好友申请',
+      body: `${from.nickname || from.id || '有人'} 想加你为好友，打开「新好友」处理`
+    }).show()
+  } catch (error) {
+    console.error('[chat] 发送好友申请通知失败', error)
   }
 }
 

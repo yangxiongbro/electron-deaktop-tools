@@ -115,6 +115,20 @@ body {
   border-bottom: 1px solid var(--app-border);
   background: var(--app-panel);
   flex: none;
+  /* 自定义标题栏：头部可以拖动窗口 */
+  -webkit-app-region: drag;
+}
+
+.app-header button {
+  -webkit-app-region: no-drag;
+}
+
+/* Windows 下隐藏了系统标题栏，右上角要让出系统窗口按钮的位置 */
+.app-shell.custom-titlebar .app-header {
+  height: 62px;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 12px);
 }
 
 .app-header h1 {

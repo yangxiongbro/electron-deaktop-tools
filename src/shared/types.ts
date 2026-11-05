@@ -275,6 +275,8 @@ export interface ApiRequestRecord {
   options: ApiRequestOptions
   /** 所属文件夹 id，null 表示在项目根目录 */
   folderId: string | null
+  /** 手动排序用的顺序值（越小越靠前；默认按创建时间排序） */
+  order?: number
   /** 最近一次发送的结果（仅用于列表展示） */
   lastStatus?: number
   lastOk?: boolean
@@ -290,6 +292,8 @@ export interface ApiFolder {
   name: string
   /** 上级文件夹 id，null 表示项目根目录 */
   parentId: string | null
+  /** 手动排序用的顺序值（越小越靠前） */
+  order?: number
   createdAt: number
   updatedAt: number
 }
@@ -380,8 +384,35 @@ export interface ChatFriend {
 
 export type ChatMessageKind = 'text' | 'image' | 'file'
 
-export interface ChatMessage {
+/** 好友申请方向：in = 别人添加我，out = 我添加别人 */
+export type ChatRequestDirection = 'in' | 'out'
+
+/** 好友申请状态；同意 / 拒绝都会记录在本次申请里 */
+export type ChatRequestStatus = 'pending' | 'accepted' | 'rejected' | 'failed'
+
+export interface ChatFriendRequest {
   id: string
+  /** 对方的申请 id：响应时要用它回执，否则申请方对不上自己的记录 */
+  remoteId: string
+  direction: ChatRequestDirection
+  /** 对方的稳定 id（用于匹配同一个人） */
+  peerId: string
+  nickname: string
+  avatar: string
+  ip: string
+  port: number
+  /** 备注：我加的备注，或对方申请时填的备注 */
+  remark: string
+  /** 发起方在添加时选择的「是否继承已有聊天记录」 */
+  inheritHistory: boolean
+  status: ChatRequestStatus
+  createdAt: number
+  respondedAt: number
+  /** 失败原因等附加说明 */
+  message: string
+}
+
+export interface ChatMessage {  id: string
   /** 所属好友 */
   friendId: string
   direction: 'in' | 'out'
@@ -404,6 +435,8 @@ export interface ChatMessage {
 export interface ChatState {
   me: ChatProfile
   friends: ChatFriend[]
+  /** 好友申请记录（添加别人 / 别人添加我） */
+  requests: ChatFriendRequest[]
   /** 聊天记录，按时间升序 */
   messages: ChatMessage[]
   dataFile: string
@@ -419,6 +452,8 @@ export interface ChatFriendInput {
   ip: string
   port: number
   remark: string
+  /** 是否继承与该好友已有的聊天记录（不填 / false 表示当作新好友） */
+  inheritHistory?: boolean
 }
 
 export interface ChatSendInput {
@@ -503,6 +538,10 @@ export interface DesktopApi {
     removeFolder(projectId: string, folderId: string): Promise<ApiProject[]>
     /** 把请求移动到指定文件夹（folderId 为空表示根目录） */
     moveRequest(projectId: string, requestId: string, folderId: string | null): Promise<ApiProject[]>
+    /** 手动排序：按传入的 id 顺序重排同一层级下的请求 */
+    reorderRequests(projectId: string, folderId: string | null, orderedIds: string[]): Promise<ApiProject[]>
+    /** 手动排序：按传入的 id 顺序重排同一层级下的文件夹 */
+    reorderFolders(projectId: string, parentId: string | null, orderedIds: string[]): Promise<ApiProject[]>
     /** 发送完成后把结果写回记录 */
     recordResult(projectId: string, requestId: string, result: ApiAttemptResult): Promise<ApiProject[]>
     /** 导出全部项目与请求到用户选择的文件，便于迁移到其他机器 */
@@ -518,6 +557,14 @@ export interface DesktopApi {
     /** 修改自己的资料（昵称 / 头像 / 端口），会广播给在线好友 */
     updateProfile(patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>): Promise<ChatState>
     addFriend(input: ChatFriendInput): Promise<ChatState>
+    /** 发送好友申请（对方同意后才会出现在好友列表） */
+    sendFriendRequest(input: ChatFriendInput): Promise<ChatState>
+    /** 处理别人发来的好友申请：同意 / 拒绝，并选择是否继承已有聊天记录 */
+    respondFriendRequest(id: string, accepted: boolean, inheritHistory: boolean): Promise<ChatState>
+    /** 删除一条申请记录 */
+    dismissRequest(id: string): Promise<ChatState>
+    /** 重新推送还没结果的申请（对方已处理过会直接回执结果） */
+    resendRequests(): Promise<ChatState>
     updateFriend(id: string, patch: Partial<ChatFriendInput>): Promise<ChatState>
     removeFriend(id: string): Promise<ChatState>
     /** 重新探测一个好友的在线状态并同步其资料 */

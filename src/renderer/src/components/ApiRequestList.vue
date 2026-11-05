@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import {
   ArrowDown,
+  Check,
   CopyDocument,
   Delete,
   DocumentAdd,
@@ -11,7 +12,9 @@ import {
   FolderAdd,
   FolderOpened,
   MoreFilled,
-  Search
+  Rank,
+  Search,
+  Sort
 } from '@element-plus/icons-vue'
 import type { ApiFolder, ApiRequestRecord } from '@shared/types'
 
@@ -47,6 +50,8 @@ const props = defineProps<{
   dataFile: string
   /** 是否折叠为窄条 */
   collapsed?: boolean
+  /** 手动排序模式：可以拖拽调整顺序 */
+  manualSort?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -58,6 +63,8 @@ const emit = defineEmits<{
   (event: 'rename-folder', id: string): void
   (event: 'remove-folder', id: string): void
   (event: 'move', id: string): void
+  (event: 'reorder', kind: 'folder' | 'request', parentId: string | null, ids: string[]): void
+  (event: 'sort-mode', mode: 'created' | 'manual'): void
   (event: 'reveal'): void
   (event: 'toggle'): void
 }>()
@@ -125,8 +132,38 @@ function matches(record: ApiRequestRecord): boolean {
   )
 }
 
+/**
+ * 排序规则：
+ * - 默认按「创建时间」倒序，新建的请求排在最上面；
+ * - 手动排序模式下按 order 从小到大，由拖拽维护。
+ */
+function sortRequests(list: ApiRequestRecord[]): ApiRequestRecord[] {
+  return [...list].sort((left, right) => {
+    if (props.manualSort) {
+      const orderLeft = left.order ?? 0
+      const orderRight = right.order ?? 0
+      if (orderLeft !== orderRight) return orderLeft - orderRight
+    }
+    return right.createdAt - left.createdAt
+  })
+}
+
+function sortFolders(list: ApiFolder[]): ApiFolder[] {
+  return [...list].sort((left, right) => {
+    if (props.manualSort) {
+      const orderLeft = left.order ?? 0
+      const orderRight = right.order ?? 0
+      if (orderLeft !== orderRight) return orderLeft - orderRight
+    }
+    return left.createdAt - right.createdAt
+  })
+}
+
 const childrenOf = (parentId: string | null): ApiFolder[] =>
-  props.folders.filter((item) => (item.parentId ?? null) === parentId).sort((a, b) => a.createdAt - b.createdAt)
+  sortFolders(props.folders.filter((item) => (item.parentId ?? null) === parentId))
+
+const requestsOf = (folderId: string | null): ApiRequestRecord[] =>
+  sortRequests(props.requests.filter((item) => (item.folderId ?? null) === folderId))
 
 /** 文件夹下的请求（含所有子文件夹），用于显示数量与级联搜索 */
 function collectRequests(folderId: string): ApiRequestRecord[] {
@@ -147,10 +184,6 @@ const folderCounts = computed<Record<string, number>>(() => {
  */
 const rows = computed<ApiListRow[]>(() => {
   const result: ApiListRow[] = []
-  const requestsOf = (folderId: string | null): ApiRequestRecord[] =>
-    props.requests
-      .filter((item) => (item.folderId ?? null) === folderId)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
 
   const searchActive = Boolean(keyword.value)
 
@@ -199,6 +232,67 @@ function onRowClick(row: ApiListRow): void {
   else emit('select', row.id)
 }
 
+/* ------------------------------ 拖拽排序 ------------------------------ */
+
+const dragRow = ref<ApiListRow | null>(null)
+const dragOverId = ref('')
+
+/** 手动排序模式、且没有在搜索时才允许拖动 */
+const canDrag = computed(() => Boolean(props.manualSort) && !keyword.value)
+
+function rowParent(row: ApiListRow): string | null {
+  return row.type === 'folder' ? (row.folder.parentId ?? null) : (row.record.folderId ?? null)
+}
+
+function onDragStart(row: ApiListRow, event: DragEvent): void {
+  if (!canDrag.value) {
+    event.preventDefault()
+    return
+  }
+  dragRow.value = row
+  event.dataTransfer?.setData('text/plain', row.id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+function onDragOver(row: ApiListRow, event: DragEvent): void {
+  const source = dragRow.value
+  if (!source || !canDrag.value) return
+  if (source.id === row.id || source.type !== row.type) return
+  if (rowParent(source) !== rowParent(row)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dragOverId.value = row.id
+}
+
+function onDragLeave(row: ApiListRow): void {
+  if (dragOverId.value === row.id) dragOverId.value = ''
+}
+
+function onDrop(row: ApiListRow): void {
+  const source = dragRow.value
+  dragOverId.value = ''
+  dragRow.value = null
+  if (!source || source.id === row.id || source.type !== row.type) return
+
+  // 只在同一层级内重排
+  const parentId = rowParent(source)
+  if (parentId !== rowParent(row)) return
+
+  const siblings = source.type === 'folder' ? childrenOf(parentId) : requestsOf(parentId)
+  const ids = siblings.map((item) => item.id)
+  const from = ids.indexOf(source.id)
+  const to = ids.indexOf(row.id)
+  if (from < 0 || to < 0 || from === to) return
+  ids.splice(from, 1)
+  ids.splice(to, 0, source.id)
+  emit('reorder', source.type, parentId, ids)
+}
+
+function onDragEnd(): void {
+  dragRow.value = null
+  dragOverId.value = ''
+}
+
 function onRowCommand(row: ApiListRow, command: string | number | object): void {
   const action = String(command)
   if (row.type === 'folder') {
@@ -240,6 +334,12 @@ function onHeaderCommand(command: string | number | object): void {
     case 'new-folder':
       emit('create-folder', null)
       break
+    case 'sort-created':
+      emit('sort-mode', 'created')
+      break
+    case 'sort-manual':
+      emit('sort-mode', 'manual')
+      break
     case 'expand':
       expandAll()
       break
@@ -276,6 +376,18 @@ function onHeaderCommand(command: string | number | object): void {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="new-folder" :icon="FolderAdd">新建文件夹</el-dropdown-item>
+            <el-dropdown-item command="sort-created" :icon="Sort" divided>
+              <span class="menu-item">
+                按创建时间排序
+                <el-icon v-if="!manualSort" :size="13"><Check /></el-icon>
+              </span>
+            </el-dropdown-item>
+            <el-dropdown-item command="sort-manual" :icon="Rank">
+              <span class="menu-item">
+                手动排序（可拖拽）
+                <el-icon v-if="manualSort" :size="13"><Check /></el-icon>
+              </span>
+            </el-dropdown-item>
             <el-dropdown-item command="expand" :icon="Expand" divided>全部展开</el-dropdown-item>
             <el-dropdown-item command="collapse" :icon="Fold">全部折叠</el-dropdown-item>
             <el-dropdown-item command="reveal" :icon="FolderOpened" divided>打开数据文件位置</el-dropdown-item>
@@ -305,21 +417,37 @@ function onHeaderCommand(command: string | number | object): void {
         <span class="tip">换个关键字试试</span>
       </div>
 
+      <div v-if="manualSort && !query" class="sort-hint small muted">
+        手动排序中：拖动行可调整同一层级内的顺序
+      </div>
+
       <div
         v-for="row in rows"
         :key="`${row.type}-${row.id}`"
         class="list-row"
         :class="{
           folder: row.type === 'folder',
-          active: row.type === 'request' && row.id === currentId
+          active: row.type === 'request' && row.id === currentId,
+          draggable: canDrag,
+          dragging: dragRow?.id === row.id,
+          'drop-target': dragOverId === row.id
         }"
         :style="{ paddingLeft: `${6 + row.depth * 12}px` }"
+        :draggable="canDrag"
         role="button"
         tabindex="0"
         :title="row.type === 'folder' ? row.folder.name : row.record.url || '未填写请求地址'"
         @click="onRowClick(row)"
         @keydown.enter.prevent="onRowClick(row)"
+        @dragstart="onDragStart(row, $event)"
+        @dragover="onDragOver(row, $event)"
+        @dragleave="onDragLeave(row)"
+        @drop.prevent="onDrop(row)"
+        @dragend="onDragEnd"
       >
+        <span v-if="canDrag" class="drag-handle" title="拖动排序">
+          <el-icon :size="12"><Rank /></el-icon>
+        </span>
         <template v-if="row.type === 'folder'">
           <el-icon class="folder-caret" :size="12">
             <ArrowDown v-if="row.expanded" />
@@ -416,9 +544,11 @@ function onHeaderCommand(command: string | number | object): void {
 
 <style scoped>
 .request-list {
-  width: 268px;
-  flex: none;
-  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  /* 随窗口变宽：最小保持原来的 268px，最宽 460px */
+  flex: 0 0 21%;
+  min-width: 268px;
+  max-width: 460px;
+  transition: flex-basis 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .request-list .panel-title {
@@ -427,7 +557,9 @@ function onHeaderCommand(command: string | number | object): void {
 }
 
 .request-list.collapsed {
-  width: 54px;
+  flex: 0 0 54px;
+  min-width: 54px;
+  max-width: 54px;
 }
 
 .count {
@@ -594,6 +726,43 @@ function onHeaderCommand(command: string | number | object): void {
 
 .list-row.folder {
   color: var(--app-text-2);
+}
+
+/* 手动排序：拖拽手柄与落点提示 */
+.sort-hint {
+  padding: 2px 8px 6px;
+  font-size: 11px;
+  color: var(--app-text-3);
+}
+
+.drag-handle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--app-text-3);
+  cursor: grab;
+  opacity: 0.55;
+}
+
+.list-row:hover .drag-handle {
+  opacity: 1;
+}
+
+.list-row.dragging {
+  opacity: 0.4;
+}
+
+.list-row.drop-target {
+  border-color: var(--app-primary);
+  box-shadow: inset 0 0 0 1px var(--app-primary);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 132px;
 }
 
 .folder-caret {
