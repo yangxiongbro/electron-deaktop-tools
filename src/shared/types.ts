@@ -403,8 +403,6 @@ export interface ChatFriendRequest {
   port: number
   /** 备注：我加的备注，或对方申请时填的备注 */
   remark: string
-  /** 发起方在添加时选择的「是否继承已有聊天记录」 */
-  inheritHistory: boolean
   status: ChatRequestStatus
   createdAt: number
   respondedAt: number
@@ -452,8 +450,6 @@ export interface ChatFriendInput {
   ip: string
   port: number
   remark: string
-  /** 是否继承与该好友已有的聊天记录（不填 / false 表示当作新好友） */
-  inheritHistory?: boolean
 }
 
 export interface ChatSendInput {
@@ -559,8 +555,8 @@ export interface DesktopApi {
     addFriend(input: ChatFriendInput): Promise<ChatState>
     /** 发送好友申请（对方同意后才会出现在好友列表） */
     sendFriendRequest(input: ChatFriendInput): Promise<ChatState>
-    /** 处理别人发来的好友申请：同意 / 拒绝，并选择是否继承已有聊天记录 */
-    respondFriendRequest(id: string, accepted: boolean, inheritHistory: boolean): Promise<ChatState>
+    /** 处理别人发来的好友申请：同意 / 拒绝 */
+    respondFriendRequest(id: string, accepted: boolean): Promise<ChatState>
     /** 删除一条申请记录 */
     dismissRequest(id: string): Promise<ChatState>
     /** 重新推送还没结果的申请（对方已处理过会直接回执结果） */

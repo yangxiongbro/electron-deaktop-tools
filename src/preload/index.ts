@@ -103,8 +103,8 @@ const api: DesktopApi = {
     addFriend: (input: ChatFriendInput) => ipcRenderer.invoke('chat:add-friend', input) as Promise<ChatState>,
     sendFriendRequest: (input: ChatFriendInput) =>
       ipcRenderer.invoke('chat:send-friend-request', input) as Promise<ChatState>,
-    respondFriendRequest: (id: string, accepted: boolean, inheritHistory: boolean) =>
-      ipcRenderer.invoke('chat:respond-friend-request', id, accepted, inheritHistory) as Promise<ChatState>,
+    respondFriendRequest: (id: string, accepted: boolean) =>
+      ipcRenderer.invoke('chat:respond-friend-request', id, accepted) as Promise<ChatState>,
     dismissRequest: (id: string) =>
       ipcRenderer.invoke('chat:dismiss-request', id) as Promise<ChatState>,
     resendRequests: () => ipcRenderer.invoke('chat:resend-requests') as Promise<ChatState>,

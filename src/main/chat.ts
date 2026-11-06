@@ -219,7 +219,6 @@ function normalizeRequest(value: unknown, now: number): ChatFriendRequest | null
     ip,
     port: clamp(Math.round(num(value.port, DEFAULT_CHAT_PORT)), 1, 65535),
     remark: str(value.remark).slice(0, 40),
-    inheritHistory: Boolean(value.inheritHistory),
     status,
     createdAt: num(value.createdAt, now),
     respondedAt: num(value.respondedAt, 0),
@@ -765,34 +764,20 @@ interface PeerInfo {
 
 /**
  * 把申请通过的好友落到好友列表。
- * inheritHistory 为 false 时当作全新好友：清掉与该对端已有的聊天记录。
+ * 重新添加同一个对端时按新好友处理：清掉它之前的聊天记录，从空白会话开始。
  */
-function createFriendFromPeer(store: ChatStore, peer: PeerInfo, inheritHistory: boolean): ChatFriend {
+function createFriendFromPeer(store: ChatStore, peer: PeerInfo): ChatFriend {
   const now = Date.now()
   const existing = store.friends.find(
     (item) => (peer.peerId && item.id === peer.peerId) || (item.ip === peer.ip && item.port === peer.port)
   )
 
-  if (!inheritHistory) {
-    // 不继承：把这个对端的历史记录清掉（旧好友 id 与对方稳定 id 都算）
-    const doomed = new Set<string>([peer.peerId])
-    if (existing) doomed.add(existing.id)
-    store.messages = store.messages.filter((item) => !doomed.has(item.friendId))
-    if (existing) store.friends = store.friends.filter((item) => item.id !== existing.id)
-  } else if (existing) {
-    // 继承：复用原来的好友 id，历史消息自然还在
-    existing.ip = peer.ip
-    existing.port = peer.port
-    if (peer.nickname) existing.nickname = peer.nickname
-    if (peer.avatar) existing.avatar = peer.avatar
-    if (!existing.remark && peer.remark) existing.remark = peer.remark
-    existing.status = 'online'
-    existing.lastSeenAt = now
-    existing.updatedAt = now
-    return existing
-  }
+  // 重新添加：把这个对端已有的聊天记录清掉（旧好友 id 与对方稳定 id 都算）
+  const doomed = new Set<string>([peer.peerId])
+  if (existing) doomed.add(existing.id)
+  store.messages = store.messages.filter((item) => !doomed.has(item.friendId))
+  if (existing) store.friends = store.friends.filter((item) => item.id !== existing.id)
 
-  // 对端稳定 id 作为好友 id：删掉再加时，「继承记录」仍然能对上同一份历史
   const friend: ChatFriend = {
     id: peer.peerId || `f-${randomSuffix()}`,
     remark: peer.remark,
@@ -852,7 +837,6 @@ export async function sendFriendRequest(input: ChatFriendInput): Promise<ChatSta
     ip,
     port,
     remark: str(input?.remark).trim().slice(0, 40),
-    inheritHistory: Boolean(input?.inheritHistory),
     status: 'pending',
     createdAt: now,
     respondedAt: 0,
@@ -872,8 +856,7 @@ export async function sendFriendRequest(input: ChatFriendInput): Promise<ChatSta
         from: peerBrief(store.me),
         payload: {
           requestId: request.id,
-          remark: request.remark,
-          inheritHistory: request.inheritHistory
+          remark: request.remark
         }
       },
       8000
@@ -900,7 +883,6 @@ async function receiveFriendRequest(
   const ip = remoteIp || localAddress()
   const port = clamp(Math.round(num(payload.port ?? from.port, DEFAULT_CHAT_PORT)), 1, 65535)
   const remark = str(payload.remark).slice(0, 40)
-  const inheritHistory = Boolean(payload.inheritHistory)
   /** 对方的申请 id —— 回执时必须原样带上，对方才能对上自己的记录 */
   const remoteId = str(payload.requestId)
   const now = Date.now()
@@ -910,7 +892,7 @@ async function receiveFriendRequest(
     (item) => (from.id && item.id === from.id) || (item.ip === ip && item.port === port)
   )
   if (already) {
-    if (remoteId) await replyFriendRequest(already.ip, already.port, remoteId, true, false)
+    if (remoteId) await replyFriendRequest(already.ip, already.port, remoteId, true)
     return
   }
 
@@ -920,13 +902,7 @@ async function receiveFriendRequest(
     ? store.requests.find((item) => item.direction === 'in' && item.remoteId && item.remoteId === remoteId)
     : null
   if (decided && decided.status !== 'pending' && now - decided.respondedAt < 24 * 60 * 60 * 1000) {
-    void replyFriendRequest(
-      decided.ip,
-      decided.port,
-      remoteId,
-      decided.status === 'accepted',
-      decided.inheritHistory
-    )
+    void replyFriendRequest(decided.ip, decided.port, remoteId, decided.status === 'accepted')
     return
   }
 
@@ -942,7 +918,6 @@ async function receiveFriendRequest(
     existing.nickname = from.nickname || existing.nickname
     existing.avatar = from.avatar || existing.avatar
     existing.remark = remark || existing.remark
-    existing.inheritHistory = inheritHistory
     existing.remoteId = remoteId || existing.remoteId
   } else {
     store.requests.push({
@@ -955,7 +930,6 @@ async function receiveFriendRequest(
       ip,
       port: from.port || port,
       remark,
-      inheritHistory,
       status: 'pending',
       createdAt: now,
       respondedAt: 0,
@@ -972,11 +946,7 @@ async function receiveFriendRequest(
 }
 
 /** 别人添加我：同意 / 拒绝 */
-export async function respondFriendRequest(
-  id: string,
-  accepted: boolean,
-  inheritHistory: boolean
-): Promise<ChatState> {
+export async function respondFriendRequest(id: string, accepted: boolean): Promise<ChatState> {
   const store = await loadStore()
   const request = store.requests.find((item) => item.id === id && item.direction === 'in')
   if (!request) throw new Error('申请不存在或已被删除')
@@ -984,29 +954,24 @@ export async function respondFriendRequest(
 
   request.status = accepted ? 'accepted' : 'rejected'
   request.respondedAt = Date.now()
-  request.inheritHistory = inheritHistory
-  request.message = accepted ? (inheritHistory ? '已同意并继承聊天记录' : '已同意，新建聊天记录') : '已拒绝'
+  request.message = accepted ? '已同意' : '已拒绝'
 
   if (accepted) {
-    createFriendFromPeer(
-      store,
-      {
-        peerId: request.peerId,
-        nickname: request.nickname,
-        avatar: request.avatar,
-        ip: request.ip,
-        port: request.port,
-        remark: request.remark
-      },
-      inheritHistory
-    )
+    createFriendFromPeer(store, {
+      peerId: request.peerId,
+      nickname: request.nickname,
+      avatar: request.avatar,
+      ip: request.ip,
+      port: request.port,
+      remark: request.remark
+    })
   }
 
   await persist()
   // 先刷新界面，再把结果回执给对方（对方离线时回执可能很慢，不能挡住界面）
   broadcastState()
   // 用对方那条申请的 id 回执，对方才能对上自己的记录
-  void replyFriendRequest(request.ip, request.port, request.remoteId, accepted, inheritHistory)
+  void replyFriendRequest(request.ip, request.port, request.remoteId, accepted)
   return chatStateSync()
 }
 
@@ -1015,8 +980,7 @@ async function replyFriendRequest(
   ip: string,
   port: number,
   requestId: string,
-  accepted: boolean,
-  inheritHistory: boolean
+  accepted: boolean
 ): Promise<void> {
   const store = await loadStore()
   if (!requestId) return
@@ -1027,7 +991,7 @@ async function replyFriendRequest(
       {
         action: 'friend-request-result',
         from: peerBrief(store.me),
-        payload: { requestId, accepted, inheritHistory }
+        payload: { requestId, accepted }
       },
       5000
     )
@@ -1076,7 +1040,6 @@ async function applyFriendRequestResult(
       ip: peer.ip,
       port: peer.port,
       remark: '',
-      inheritHistory: true,
       status: 'accepted',
       createdAt: Date.now(),
       respondedAt: Date.now(),
@@ -1088,7 +1051,7 @@ async function applyFriendRequestResult(
   }
 
   if (accepted) {
-    createFriendFromPeer(store, peer, request ? request.inheritHistory : true)
+    createFriendFromPeer(store, peer)
   }
 
   await persist()
@@ -1116,8 +1079,7 @@ export async function resendPendingRequests(): Promise<ChatState> {
             from: peerBrief(store.me),
             payload: {
               requestId: request.id,
-              remark: request.remark,
-              inheritHistory: request.inheritHistory
+              remark: request.remark
             }
           },
           4000
@@ -1154,7 +1116,7 @@ export async function updateFriend(id: string, patch: Partial<ChatFriendInput>):
 export async function removeFriend(id: string): Promise<ChatState> {
   const store = await loadStore()
   store.friends = store.friends.filter((item) => item.id !== id)
-  // 聊天记录先留着：以后重新加好友时可以选择「继承已有的聊天记录」
+  // 聊天记录先留着（数据文件里仍可追溯）；重新加为好友时会按新好友处理，从空白记录开始
   await persist()
   broadcastState()
   return chatStateSync()

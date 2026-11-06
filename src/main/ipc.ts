@@ -411,8 +411,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     'chat:respond-friend-request',
-    (_event, id: string, accepted: boolean, inheritHistory: boolean) =>
-      respondFriendRequest(id, Boolean(accepted), Boolean(inheritHistory))
+    (_event, id: string, accepted: boolean) => respondFriendRequest(id, Boolean(accepted))
   )
 
   ipcMain.handle('chat:dismiss-request', (_event, id: string) => dismissRequest(id))

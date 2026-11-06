@@ -275,14 +275,13 @@ async function refreshAllSilently(): Promise<void> {
 
 const friendDialog = ref(false)
 const editingFriendId = ref('')
-const friendForm = reactive({ ip: '', port: '45871', remark: '', inheritHistory: false })
+const friendForm = reactive({ ip: '', port: '45871', remark: '' })
 
 function openAddFriend(): void {
   editingFriendId.value = ''
   friendForm.ip = ''
   friendForm.port = String(me.value?.port ?? 45871)
   friendForm.remark = ''
-  friendForm.inheritHistory = false
   friendDialog.value = true
 }
 
@@ -291,7 +290,6 @@ function openEditFriend(friend: ChatFriend): void {
   friendForm.ip = friend.ip
   friendForm.port = String(friend.port)
   friendForm.remark = friend.remark
-  friendForm.inheritHistory = false
   friendDialog.value = true
 }
 
@@ -322,8 +320,7 @@ async function submitFriend(): Promise<void> {
         await window.api.chat.sendFriendRequest({
           ip,
           port,
-          remark: friendForm.remark.trim(),
-          inheritHistory: friendForm.inheritHistory
+          remark: friendForm.remark.trim()
         })
       )
       ElMessage.success('好友申请已发送，等待对方同意')
@@ -337,8 +334,6 @@ async function submitFriend(): Promise<void> {
 /* ---------------------------- 好友申请 ---------------------------- */
 
 const requestDialog = ref(false)
-/** 每条申请「是否继承已有聊天记录」的勾选状态（处理前可改） */
-const inheritFlags = reactive<Record<string, boolean>>({})
 
 const requests = computed(() => state.value?.requests ?? [])
 
@@ -349,14 +344,6 @@ const pendingIncoming = computed(
 const sortedRequests = computed(() =>
   [...requests.value].sort((left, right) => right.createdAt - left.createdAt)
 )
-
-function inheritOf(id: string): boolean {
-  return inheritFlags[id] ?? false
-}
-
-function setInherit(id: string, value: boolean): void {
-  inheritFlags[id] = value
-}
 
 function requestPeerName(request: ChatFriendRequest): string {
   return request.remark || request.nickname || request.ip
@@ -392,14 +379,14 @@ function requestTime(request: ChatFriendRequest): string {
 
 async function respondRequest(request: ChatFriendRequest, accepted: boolean): Promise<void> {
   try {
-    const next = await window.api.chat.respondFriendRequest(request.id, accepted, inheritOf(request.id))
+    const next = await window.api.chat.respondFriendRequest(request.id, accepted)
     applyState(next)
     if (accepted) {
       const friend = next.friends.find(
         (item) => item.id === request.peerId || (item.ip === request.ip && item.port === request.port)
       )
       if (friend) currentFriendId.value = friend.id
-      ElMessage.success(inheritOf(request.id) ? '已同意，并继承之前的聊天记录' : '已同意，已建立新的聊天记录')
+      ElMessage.success('已同意好友申请')
     } else {
       ElMessage.success('已拒绝该好友申请')
     }
@@ -419,7 +406,7 @@ async function dismissRequest(id: string): Promise<void> {
 async function removeFriend(friend: ChatFriend): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确定删除好友「${friend.remark || friend.nickname || friend.ip}」吗？聊天记录会保留，之后重新加为好友时可以选择继承。`,
+      `确定删除好友「${friend.remark || friend.nickname || friend.ip}」吗？重新添加时需要对方再次同意，并会从空白记录开始。`,
       '删除好友',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
@@ -1084,13 +1071,10 @@ onUnmounted(() => {
           <span class="form-label">备注</span>
           <el-input v-model="friendForm.remark" placeholder="给这位好友起个名字，例如：隔壁老王" />
         </div>
-        <el-checkbox v-if="!editingFriendId" v-model="friendForm.inheritHistory">
-          继承与该好友已有的聊天记录
-        </el-checkbox>
         <div v-if="!editingFriendId" class="small muted">
-          发送申请后需要对方同意才会出现在好友列表；不勾选「继承」则按新好友处理（从空白记录开始）。
+          发送申请后需要对方同意才会出现在好友列表；同意后从空白记录开始聊天。
         </div>
-        <div v-else class="small muted">修改备注只影响本地显示，不会通知对方。</div>
+        <div v-else class="small muted">修改 IP / 端口后会重新探测在线状态；备注只影响本地显示。</div>
       </div>
       <template #footer>
         <el-button @click="friendDialog = false">取消</el-button>
@@ -1117,18 +1101,9 @@ onUnmounted(() => {
             </div>
             <div class="request-sub small muted">
               {{ requestStatusText(request) }} · {{ requestTime(request) }}
-              <span v-if="request.inheritHistory" class="request-inherit">· 继承聊天记录</span>
             </div>
           </div>
           <template v-if="request.status === 'pending' && request.direction === 'in'">
-            <el-checkbox
-              :model-value="inheritOf(request.id)"
-              size="small"
-              class="request-check"
-              @update:model-value="(value: unknown) => setInherit(request.id, Boolean(value))"
-            >
-              继承记录
-            </el-checkbox>
             <el-button size="small" type="primary" @click="respondRequest(request, true)">同意</el-button>
             <el-button size="small" @click="respondRequest(request, false)">拒绝</el-button>
           </template>
@@ -1942,15 +1917,6 @@ onUnmounted(() => {
 .request-sub {
   margin-top: 2px;
   font-size: 11.5px;
-}
-
-.request-inherit {
-  color: var(--app-primary);
-}
-
-.request-check {
-  flex: none;
-  margin-right: 2px;
 }
 
 .request-state {
