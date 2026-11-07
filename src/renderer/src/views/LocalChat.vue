@@ -8,18 +8,24 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  ArrowDown,
+  Connection,
+  CopyDocument,
   Delete,
   Document,
   EditPen,
   FolderOpened,
+  Lock,
   MoreFilled,
   Plus,
   Position,
+  QuestionFilled,
   Refresh,
   Search,
+  Unlock,
   User
 } from '@element-plus/icons-vue'
-import type { ChatFriend, ChatFriendRequest, ChatMessage, ChatPeerStatus, ChatState } from '@shared/types'
+import type { ChatFriend, ChatFriendRequest, ChatFrpConfig, ChatMessage, ChatPeerStatus, ChatState } from '@shared/types'
 import { formatBytes } from '../utils/format'
 
 const STATUS_TEXT: Record<ChatPeerStatus, string> = {
@@ -80,6 +86,28 @@ const filteredFriends = computed(() => {
 const currentFriend = computed(
   () => friends.value.find((item) => item.id === currentFriendId.value) ?? null
 )
+
+/** 聊天窗口里的加密状态说明 */
+const encryptedHint = computed(() => {
+  const friend = currentFriend.value
+  if (!friend) return ''
+  if (!friend.pub) return '对方还没上报加密公钥（可能是旧版本），当前只走 HTTPS 传输加密'
+  const print = friend.keyPrint || '-'
+  return `消息正文用 X25519 + AES-256-GCM 端到端加密，会话密钥 ${print}；和对方窗口里的指纹一致就说明没有中间人`
+})
+
+/** 加密详情弹窗 */
+const cryptoDialog = ref(false)
+
+async function copyText(value: string, label: string): Promise<void> {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success(`已复制${label}`)
+  } catch {
+    ElMessage.warning(`请手动复制：${value}`)
+  }
+}
 
 const currentMessages = computed(() =>
   messages.value.filter((item) => item.friendId === currentFriendId.value)
@@ -211,19 +239,58 @@ async function reload(): Promise<void> {
 
 let offMessage: (() => void) | undefined
 let offState: (() => void) | undefined
+let bottomTimer: number | undefined
 
-function scrollToBottom(): void {
+/** 是否停在会话底部：用户往上翻时不要把他拽回来 */
+const atBottom = ref(true)
+
+function updateAtBottom(): void {
+  const el = messageListRef.value
+  if (!el) return
+  // 留 40px 容差：图片加载、行高微调不会误判
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+}
+
+function onMessageScroll(): void {
+  updateAtBottom()
+}
+
+/** force = true 用于切换会话 / 主动点「回到底部」 */
+function scrollToBottom(force = false): void {
+  if (!force && !atBottom.value) return
   void nextTick(() => {
     const el = messageListRef.value
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    atBottom.value = true
   })
 }
 
+// 切换好友、改搜索词时总是回到底部；来新消息则只在「本来就在底部」时跟随
+watch(currentFriendId, () => {
+  atBottom.value = true
+  scrollToBottom(true)
+})
+
+watch(historyQuery, () => {
+  atBottom.value = true
+  scrollToBottom(true)
+})
+
 watch(
-  () => [currentFriendId.value, historyQuery.value, currentMessages.value.length],
-  () => scrollToBottom()
+  () => currentMessages.value.length,
+  (next, prev) => {
+    // 切换会话时长度也会变，但那时上面已经强制滚到底了
+    if (next > prev) scrollToBottom()
+  }
 )
 
+onMounted(() => {
+  // 图片是异步解码的，加载完会撑高内容；只在用户本来就停在底部时才继续贴着底部
+  bottomTimer = window.setInterval(() => {
+    if (atBottom.value) scrollToBottom()
+  }, 1500)
+})
 /* ------------------------------ 好友操作 ------------------------------ */
 
 async function selectFriend(friend: ChatFriend): Promise<void> {
@@ -272,6 +339,157 @@ async function refreshAllSilently(): Promise<void> {
 }
 
 /* ---------------------------- 添加 / 编辑好友 ---------------------------- */
+
+/* ------------------------------ 跨网络（FRP） ------------------------------ */
+
+const frpDialog = ref(false)
+const frpBusy = ref(false)
+const frpForm = reactive({
+  serverAddr: '',
+  serverPort: '7000',
+  token: '',
+  remotePort: '',
+  frpcPath: ''
+})
+
+const frp = computed(() => state.value?.frp)
+const security = computed(() => state.value?.security)
+
+const frpStatusText = computed(() => {
+  const current = frp.value
+  if (!current) return '未初始化'
+  switch (current.status) {
+    case 'running':
+      return '已连接'
+    case 'starting':
+      return '连接中…'
+    case 'error':
+      return current.message || '连接失败'
+    default:
+      return current.message || '未连接'
+  }
+})
+
+const frpStatusClass = computed(() => frp.value?.status ?? 'stopped')
+
+function openFrp(): void {
+  const current = frp.value?.config
+  if (current) {
+    frpForm.serverAddr = current.serverAddr
+    frpForm.serverPort = String(current.serverPort)
+    frpForm.token = current.token
+    frpForm.remotePort = current.remotePort
+      ? String(current.remotePort)
+      : String(suggestedRemotePort.value)
+    frpForm.frpcPath = current.frpcPath
+  }
+  frpDialog.value = true
+}
+
+/** 按本机身份算一个建议端口：同一台 frps 上不同机器算出来不同，不容易抢同一个端口 */
+const suggestedRemotePort = computed(() => {
+  const name = frp.value?.proxyName ?? ''
+  const tail = Number.parseInt(name.slice(-4), 16)
+  return 45000 + (Number.isFinite(tail) ? tail % 1000 : 0)
+})
+
+/** 校验并收集表单里的 FRP 配置 */
+function readFrpForm(): Partial<ChatFrpConfig> | null {
+  const serverPort = Number(frpForm.serverPort)
+  const remotePort = frpForm.remotePort.trim() ? Number(frpForm.remotePort) : 0
+  if (frpForm.serverAddr.trim() && (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65535)) {
+    ElMessage.warning('服务器端口需要在 1 ~ 65535 之间')
+    return null
+  }
+  if (frpForm.remotePort.trim() && (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535)) {
+    ElMessage.warning('对外端口需要在 1 ~ 65535 之间')
+    return null
+  }
+  return {
+    serverAddr: frpForm.serverAddr.trim(),
+    serverPort: Number.isInteger(serverPort) ? serverPort : 7000,
+    token: frpForm.token.trim(),
+    remotePort,
+    frpcPath: frpForm.frpcPath.trim()
+  }
+}
+
+async function saveFrpForm(): Promise<void> {
+  const patch = readFrpForm()
+  if (!patch) return
+  try {
+    applyState(await window.api.chat.saveFrp(patch))
+    ElMessage.success('已保存')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function toggleFrp(): Promise<void> {
+  if (frpBusy.value) return
+  const active = frp.value?.status === 'running' || frp.value?.status === 'starting'
+  const patch = readFrpForm()
+  if (!patch) return
+  frpBusy.value = true
+  try {
+    if (active) {
+      // 先真正断开，再落 enabled=false：两步反过来会被「保存即自动重连」的逻辑立刻拉起来
+      applyState(await window.api.chat.stopFrp())
+      applyState(await window.api.chat.saveFrp({ ...patch, enabled: false }))
+      ElMessage.success('已断开跨网络连接')
+    } else {
+      applyState(await window.api.chat.saveFrp({ ...patch, enabled: true }))
+      applyState(await window.api.chat.startFrp())
+      const next = state.value?.frp
+      if (next?.status === 'error') ElMessage.error(next.message || '连接失败')
+      else ElMessage.success('已发起连接，稍等几秒看状态')
+    }
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    frpBusy.value = false
+  }
+}
+
+async function chooseFrpcBinary(): Promise<void> {
+  try {
+    const result = await window.api.chat.chooseFrpc()
+    if (result.canceled) return
+    frpForm.frpcPath = result.path ?? ''
+    ElMessage.success('已选择 frpc')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function copyPublicAddress(): Promise<void> {
+  const address = frp.value?.publicAddress
+  if (!address) {
+    ElMessage.warning('先填写服务器地址与对外端口')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(address)
+    ElMessage.success(`已复制：${address}`)
+  } catch {
+    ElMessage.warning(`请手动复制：${address}`)
+  }
+}
+
+async function copyFingerprint(): Promise<void> {
+  const value = security.value?.fingerprint ?? ''
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success('已复制证书指纹')
+  } catch {
+    ElMessage.warning(`请手动复制：${value}`)
+  }
+}
+
+function openFrpDownload(): void {
+  void window.api.app.openExternal('https://github.com/fatedier/frp/releases')
+}
 
 const friendDialog = ref(false)
 const editingFriendId = ref('')
@@ -334,6 +552,8 @@ async function submitFriend(): Promise<void> {
 /* ---------------------------- 好友申请 ---------------------------- */
 
 const requestDialog = ref(false)
+/** 使用说明弹窗 */
+const helpDialog = ref(false)
 
 const requests = computed(() => state.value?.requests ?? [])
 
@@ -451,6 +671,12 @@ async function onFriendCommand(command: string | number | object): Promise<void>
     case 'edit':
       openEditFriend(friend)
       break
+    case 'crypto':
+      cryptoDialog.value = true
+      break
+    case 'trust':
+      await trustCert(friend)
+      break
     case 'clear':
       await clearHistory()
       break
@@ -462,16 +688,50 @@ async function onFriendCommand(command: string | number | object): Promise<void>
   }
 }
 
+/** 对方重装程序后 HTTPS 证书会变，清掉记住的指纹重新信任 */
+async function trustCert(friend: ChatFriend): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '对方更换程序或重装后证书会变。确认对方身份后再信任，否则可能被中间人冒充。',
+      '信任对方新证书',
+      { type: 'warning', confirmButtonText: '信任', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    applyState(await window.api.chat.trustPeerCert(friend.id))
+    ElMessage.success('已清除旧的证书记录，下次连接会记住新证书')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
 /* ------------------------------ 我的资料 ------------------------------ */
 
 const profileDialog = ref(false)
-const profileForm = reactive({ nickname: '', port: '', avatar: '' })
+const profileForm = reactive({ nickname: '', port: '', avatar: '', host: '' })
+
+/** 监听地址选项：空字符串 = 自动（默认路由出口） */
+const hostOptions = computed(() => {
+  const network = state.value?.network
+  const options = [{ label: `自动（推荐，当前 ${network?.auto ?? '-'}）`, value: '' }]
+  for (const item of network?.options ?? []) {
+    options.push({
+      label: `${item.address}${item.virtual ? '（虚拟网卡）' : ''} · ${item.iface}`,
+      value: item.address
+    })
+  }
+  return options
+})
 
 function openProfile(): void {
   if (!me.value) return
   profileForm.nickname = me.value.nickname
   profileForm.port = String(me.value.port)
   profileForm.avatar = me.value.avatar
+  // 手动选过就用那个地址，否则显示「自动」
+  profileForm.host = state.value?.network?.manual ? (state.value?.network?.current ?? '') : ''
   profileDialog.value = true
 }
 
@@ -542,7 +802,7 @@ async function saveProfile(): Promise<void> {
   }
   try {
     applyState(
-      await window.api.chat.updateProfile({ nickname, port, avatar: profileForm.avatar })
+      await window.api.chat.updateProfile({ nickname, port, avatar: profileForm.avatar, host: profileForm.host })
     )
     profileDialog.value = false
     if (state.value?.portError) ElMessage.error(state.value.portError)
@@ -766,6 +1026,7 @@ onUnmounted(() => {
   offMessage?.()
   offState?.()
   if (refreshTimer) window.clearInterval(refreshTimer)
+  if (bottomTimer) window.clearInterval(bottomTimer)
   window.removeEventListener('mousemove', onResizeMove)
   window.removeEventListener('mouseup', stopResize)
 })
@@ -777,25 +1038,67 @@ onUnmounted(() => {
       <!-- 左：我的资料 + 好友列表（可拖拽伸缩） -->
       <aside class="panel user-panel" :style="{ width: `${panelWidth}px` }">
         <div class="me-card">
-          <button class="avatar-btn" type="button" title="编辑我的资料" @click="openProfile">
-            <img v-if="me?.avatar" class="avatar avatar-lg" :src="me.avatar" alt="" />
-            <span v-else class="avatar avatar-lg avatar-fallback">{{ me?.nickname?.slice(0, 1) ?? '我' }}</span>
-            <span class="avatar-edit"><el-icon :size="11"><EditPen /></el-icon></span>
-          </button>
-          <div class="me-info">
-            <div class="me-name">{{ me?.nickname ?? '未命名' }}</div>
-            <div class="me-addr small muted mono">
-              {{ me?.host || '-' }}:{{ me?.port ?? '-' }}
-            </div>
-          </div>
-          <el-tooltip :content="state?.listening ? '正在监听端口' : state?.portError || '未启动'" placement="bottom">
-            <span class="listen-dot" :class="{ on: state?.listening }" />
-          </el-tooltip>
-          <el-tooltip content="聊天文件保存目录" placement="bottom">
-            <button class="mini-btn" type="button" @click="openChatDir">
-              <el-icon :size="13"><FolderOpened /></el-icon>
+          <div class="me-top">
+            <button class="avatar-btn" type="button" title="编辑我的资料" @click="openProfile">
+              <img v-if="me?.avatar" class="avatar avatar-lg" :src="me.avatar" alt="" />
+              <span v-else class="avatar avatar-lg avatar-fallback">{{ me?.nickname?.slice(0, 1) ?? '我' }}</span>
+              <span class="avatar-edit"><el-icon :size="11"><EditPen /></el-icon></span>
             </button>
-          </el-tooltip>
+            <div class="me-info">
+              <div class="me-name">{{ me?.nickname ?? '未命名' }}</div>
+              <div class="me-addr small muted mono">
+                {{ me?.host || '-' }}:{{ me?.port ?? '-' }}
+              </div>
+            </div>
+            <el-tooltip
+              :content="state?.listening ? '正在监听端口（HTTPS）' : state?.portError || '未启动'"
+              placement="bottom"
+            >
+              <span class="listen-dot" :class="{ on: state?.listening }" />
+            </el-tooltip>
+          </div>
+
+          <!-- 头像昵称下方一排图标：跨网络 / 文件目录 / 使用说明 / 新好友 / 添加好友 -->
+          <div class="me-actions">
+            <el-tooltip content="跨网络（FRP）" placement="bottom">
+              <button
+                class="me-action"
+                :class="{ on: frp?.status === 'running' }"
+                type="button"
+                @click="openFrp"
+              >
+                <el-icon :size="14"><Connection /></el-icon>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="聊天文件保存目录" placement="bottom">
+              <button class="me-action" type="button" @click="openChatDir">
+                <el-icon :size="14"><FolderOpened /></el-icon>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="使用说明" placement="bottom">
+              <button class="me-action" type="button" @click="helpDialog = true">
+                <el-icon :size="14"><QuestionFilled /></el-icon>
+              </button>
+            </el-tooltip>
+            <span class="me-divider" />
+            <el-tooltip :content="`新好友（${pendingIncoming} 个待处理）`" placement="bottom">
+              <el-badge
+                :value="pendingIncoming"
+                :hidden="pendingIncoming === 0"
+                :max="99"
+                class="friend-badge me-badge"
+              >
+                <button class="me-action" type="button" @click="openRequests">
+                  <el-icon :size="14"><User /></el-icon>
+                </button>
+              </el-badge>
+            </el-tooltip>
+            <el-tooltip content="添加好友" placement="bottom">
+              <button class="me-action" type="button" @click="openAddFriend">
+                <el-icon :size="14"><Plus /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
         </div>
 
         <div class="friend-toolbar">
@@ -807,14 +1110,6 @@ onUnmounted(() => {
             clearable
             class="friend-search"
           />
-          <el-tooltip :content="`新好友（${pendingIncoming} 个待处理）`" placement="bottom">
-            <el-badge :value="pendingIncoming" :hidden="pendingIncoming === 0" :max="99" class="friend-badge">
-              <el-button size="small" :icon="User" @click="openRequests" />
-            </el-badge>
-          </el-tooltip>
-          <el-tooltip content="添加好友" placement="bottom">
-            <el-button size="small" :icon="Plus" @click="openAddFriend" />
-          </el-tooltip>
         </div>
 
         <div class="friend-list">
@@ -867,6 +1162,12 @@ onUnmounted(() => {
                 <span class="status-tag" :class="statusClass(currentFriend.status)">
                   {{ statusText(currentFriend.status) }}
                 </span>
+                <el-tooltip :content="encryptedHint" placement="bottom">
+                  <span class="crypto-tag" :class="{ on: Boolean(currentFriend.pub) }">
+                    <el-icon :size="11"><Lock v-if="currentFriend.pub" /><Unlock v-else /></el-icon>
+                    {{ currentFriend.pub ? '端到端加密' : '仅 HTTPS' }}
+                  </span>
+                </el-tooltip>
               </div>
               <div class="small muted mono">{{ currentFriend.ip }}:{{ currentFriend.port }}</div>
             </div>
@@ -887,6 +1188,8 @@ onUnmounted(() => {
                 <el-dropdown-menu>
                   <el-dropdown-item command="refresh" :icon="Refresh">刷新好友信息</el-dropdown-item>
                   <el-dropdown-item command="edit" :icon="EditPen">编辑好友</el-dropdown-item>
+                  <el-dropdown-item command="crypto" :icon="Lock">加密详情</el-dropdown-item>
+                  <el-dropdown-item command="trust" :icon="Lock" divided>信任对方新证书</el-dropdown-item>
                   <el-dropdown-item command="clear" :icon="Delete" divided>清空聊天记录</el-dropdown-item>
                   <el-dropdown-item command="remove" :icon="Delete">删除好友</el-dropdown-item>
                 </el-dropdown-menu>
@@ -894,7 +1197,7 @@ onUnmounted(() => {
             </el-dropdown>
           </header>
 
-          <div ref="messageListRef" class="message-list">
+          <div ref="messageListRef" class="message-list" @scroll.passive="onMessageScroll">
             <div v-if="historyQuery" class="filter-hint small muted">
               筛选出 {{ visibleMessages.length }} 条包含「{{ historyQuery }}」的消息
             </div>
@@ -916,6 +1219,13 @@ onUnmounted(() => {
                   v-else-if="row.message.direction === 'in'"
                   class="avatar avatar-sm avatar-fallback"
                 >{{ (currentFriend.remark || currentFriend.nickname || '友').slice(0, 1) }}</span>
+                <img
+                  v-else-if="me?.avatar"
+                  class="avatar avatar-sm"
+                  :src="me.avatar"
+                  alt=""
+                />
+                <span v-else class="avatar avatar-sm avatar-fallback">{{ me?.nickname?.slice(0, 1) || '我' }}</span>
 
                 <div class="bubble-wrap">
                   <div
@@ -989,6 +1299,12 @@ onUnmounted(() => {
               </div>
             </template>
           </div>
+
+          <el-tooltip content="回到最新消息" placement="top">
+            <button v-if="!atBottom" class="to-bottom" type="button" @click="scrollToBottom(true)">
+              <el-icon :size="14"><ArrowDown /></el-icon>
+            </button>
+          </el-tooltip>
 
           <div class="composer">
             <div class="composer-tools">
@@ -1145,13 +1461,248 @@ onUnmounted(() => {
           <span class="form-label">端口</span>
           <el-input v-model="profileForm.port" placeholder="1024 ~ 65535" />
         </div>
+        <div class="form-row">
+          <span class="form-label">监听地址</span>
+          <el-select v-model="profileForm.host" placeholder="自动选择" class="host-select">
+            <el-option v-for="item in hostOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </div>
         <div class="small muted">
           修改昵称、头像或端口后会广播给在线好友；端口被占用时界面底部会提示。
+          多网卡时默认用能上网的那块网卡的地址，如果好友连不上，可以在这里换一块网卡（虚拟网卡一般连不通）。
+        </div>
+        <el-divider content-position="left">安全</el-divider>
+        <div class="security-block">
+          <div class="security-row">
+            <el-icon :size="13" class="security-icon"><Lock /></el-icon>
+            <span>传输：HTTPS（自签名证书，首次连接记住对方指纹）</span>
+          </div>
+          <div class="security-row">
+            <el-icon :size="13" class="security-icon"><Lock /></el-icon>
+            <span>内容：X25519 + AES-256-GCM 端到端加密</span>
+          </div>
+          <div class="security-fp">
+            <span class="small muted">本机证书指纹</span>
+            <span class="mono small">{{ security?.fingerprint || '-' }}</span>
+            <el-button size="small" text :icon="CopyDocument" @click="copyFingerprint">复制</el-button>
+          </div>
         </div>
       </div>
       <template #footer>
         <el-button @click="profileDialog = false">取消</el-button>
         <el-button type="primary" @click="saveProfile">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 跨网络（FRP） -->
+    <el-dialog v-model="frpDialog" title="跨网络（FRP）" width="600px" append-to-body>
+      <div class="form-stack">
+        <div class="frp-status" :class="frpStatusClass">
+          <span class="frp-dot" />
+          <span class="frp-status-text">{{ frpStatusText }}</span>
+          <span class="spacer" />
+          <el-tag v-if="frp?.binary" size="small" type="info" effect="plain">
+            frpc {{ frp.version || '未知版本' }}
+          </el-tag>
+        </div>
+
+        <div class="frp-address">
+          <span class="small muted">对外地址</span>
+          <span class="mono frp-address-text">{{ frp?.publicAddress || '填写下面的服务器信息后自动生成' }}</span>
+          <el-button size="small" text :icon="CopyDocument" :disabled="!frp?.publicAddress" @click="copyPublicAddress">
+            复制
+          </el-button>
+        </div>
+        <div class="small muted">
+          把这个地址发给好友，他们按「IP + 端口」加你即可。需要有一台公网服务器跑 frps（参考 frp 官方文档），
+          本机用 frpc 把聊天端口映射上去；聊天内容仍是端到端加密的，服务器看不到。
+        </div>
+        <div class="frp-note small muted">
+          代理名 <span class="mono">{{ frp?.proxyName || '-' }}</span>（每台机器不同，多台机器连同一台 frps 不会互相顶掉）；
+          同一台服务器上每个人的「对外端口」要各不相同，否则后连的那台会被服务器拒绝。
+        </div>
+
+        <div class="form-row">
+          <span class="form-label">服务器地址</span>
+          <el-input v-model="frpForm.serverAddr" placeholder="frps 所在服务器的 IP 或域名" />
+        </div>
+        <div class="form-row">
+          <span class="form-label">服务端口</span>
+          <el-input v-model="frpForm.serverPort" placeholder="frps 的 bind_port，默认 7000" />
+        </div>
+        <div class="form-row">
+          <span class="form-label">Token</span>
+          <el-input v-model="frpForm.token" placeholder="frps 配置的 token，没有就留空" show-password />
+        </div>
+        <div class="form-row">
+          <span class="form-label">对外端口</span>
+          <el-input v-model="frpForm.remotePort" :placeholder="`服务器上对外开放的端口，建议 ${suggestedRemotePort}`">
+            <template #append>
+              <el-button @click="frpForm.remotePort = String(suggestedRemotePort)">用建议值</el-button>
+            </template>
+          </el-input>
+        </div>
+        <div class="form-row">
+          <span class="form-label">frpc</span>
+          <el-input v-model="frpForm.frpcPath" placeholder="留空自动查找；可点右侧选择" readonly>
+            <template #append>
+              <el-button @click="chooseFrpcBinary">选择</el-button>
+            </template>
+          </el-input>
+        </div>
+
+        <div v-if="frp?.logs?.length" class="frp-logs">
+          <div v-for="(line, index) in frp.logs.slice(-40)" :key="index" class="frp-log-line">{{ line }}</div>
+        </div>
+        <div v-else class="small muted">
+          还没有运行日志。没有 frpc 时可从
+          <el-link type="primary" :underline="false" @click="openFrpDownload">frp 官方发布页</el-link>
+          下载，放到安装目录的 resources/frp 下，或点上面「选择」指定路径。
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="frpDialog = false">关闭</el-button>
+        <el-button @click="saveFrpForm">保存配置</el-button>
+        <el-button type="primary" :loading="frpBusy" @click="toggleFrp">
+          {{ frp?.status === 'running' || frp?.status === 'starting' ? '断开' : '连接' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 加密详情 -->
+    <el-dialog v-model="cryptoDialog" title="加密详情" width="560px" append-to-body>
+      <div v-if="currentFriend" class="form-stack">
+        <div class="crypto-row">
+          <span class="crypto-label">与谁</span>
+          <span>{{ currentFriend.remark || currentFriend.nickname || currentFriend.ip }}</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-label">传输</span>
+          <span>HTTPS{{ currentFriend.certPrint ? '（已记住对方证书指纹）' : '（首次连接后记住对方证书）' }}</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-label">内容</span>
+          <span v-if="currentFriend.pub">X25519 + AES-256-GCM 端到端加密</span>
+          <span v-else class="warn">对方未上报加密公钥，目前只有 HTTPS 传输加密</span>
+        </div>
+        <div class="crypto-key">
+          <div class="small muted">会话密钥指纹（与对方窗口里的指纹对比，一致即说明没有中间人）</div>
+          <div class="crypto-key-value mono">{{ currentFriend.keyPrint || '—（对方未上报公钥）' }}</div>
+          <el-button
+            size="small"
+            :icon="CopyDocument"
+            :disabled="!currentFriend.keyPrint"
+            @click="copyText(currentFriend.keyPrint || '', '会话密钥指纹')"
+          >
+            复制
+          </el-button>
+        </div>
+        <div class="separator" />
+        <div class="crypto-row">
+          <span class="crypto-label">本机证书</span>
+          <span class="mono crypto-small">{{ security?.fingerprint || '-' }}</span>
+        </div>
+        <div class="crypto-row">
+          <span class="crypto-label">对方证书</span>
+          <span class="mono crypto-small">{{ currentFriend.certPrint || '（还没有连过）' }}</span>
+        </div>
+        <div class="small muted">
+          会话密钥由双方的 X25519 私钥协商得出，只有你和对方能算出来；本机的消息在发送前就已经是密文，
+          经过 FRP 服务器或其它中转都读不到内容。
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="cryptoDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 使用说明 -->
+    <el-dialog v-model="helpDialog" title="本地聊天 · 使用说明" width="620px" append-to-body>
+      <div class="help-body">
+        <section class="help-section">
+          <h4>加好友</h4>
+          <p>
+            点好友列表右上角的「+」，填对方的 <b>IP</b> 与 <b>端口</b>（默认 45871），可选填备注。
+            对方会在「新好友」里看到申请，<b>同意之后</b>才会出现在你的好友列表；同意 / 拒绝的结果都会记录在申请列表里。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>对方换了 IP / 端口</h4>
+          <p class="help-callout">
+            好友更换 IP \ 端口时，会自动广播给在线好友并且同步修改该好友的 IP \ 端口。如果没有同步更改或者在新的机器上使用本程序，
+            可以在「编辑好友」中手动更改好友信息，修改为新的 IP \ 端口。
+          </p>
+          <p class="muted">
+            手动修改的入口：选中好友后点聊天窗口右上角「⋯ → 编辑好友」；改完会重新探测对方的在线状态。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>监听地址（多网卡时用哪个 IP）</h4>
+          <p>
+            程序默认自动挑一块「能上网」的网卡地址：取的是系统默认路由出口的 IP，通常就是你现在上网用的那块网卡，
+            不会去用 Hyper-V、VMware、VirtualBox、Docker、VPN 这类虚拟网卡的地址。
+          </p>
+          <p class="muted">
+            如果好友按界面上显示的地址连不上（例如机器上有多个网卡、或你要走另一条内网），
+            点左上角头像进入「我的资料」，在「<b>监听地址</b>」下拉里选具体网卡地址 ——
+            每项都带网卡名，标了「虚拟网卡」的一般连不通；选好点「保存」会自动广播给在线好友。
+            想换回自动就选第一项「自动（推荐）」。换了网线 / Wi-Fi 之后建议重新选一次，或直接选「自动」。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>不在同一个局域网（跨网络）</h4>
+          <p>
+            点好友列表左上角的「跨网络」图标，填一台公网 frps 的地址 / 端口 / token 与自己的「对外端口」，
+            程序会自动拉起本机 frpc 把聊天端口映射出去；把面板里的「对外地址」（服务器地址:对外端口）发给好友，
+            对方按这个地址加你即可。同一台服务器上每个人的对外端口要各不相同。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>安全与加密</h4>
+          <p>
+            聊天接口走 <b>HTTPS</b>（首次连接会记住对方证书指纹，指纹异常会拒绝发送），
+            消息正文再用 <b>X25519 + AES-256-GCM 端到端加密</b>，经过 FRP 服务器也读不到内容。
+            对方重装程序导致证书变化时，可在好友菜单里「信任对方新证书」。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>怎么确认消息真的加密了</h4>
+          <p class="help-callout">
+            选中有好友的会话，聊天窗口标题旁的标签显示「<b>端到端加密</b>」就表示这段时间的消息都会先加密再发送
+            （显示「仅 HTTPS」说明对方还没上报密钥，可能是旧版本）。
+            点窗口右上角「⋯ → 加密详情」可以看到<b>会话密钥指纹</b>：把它和对方窗口里的指纹对一下，
+            两边一致就说明你们用的是同一把端到端密钥，中间人没有插进来。
+          </p>
+          <p class="muted">
+            想更硬核地验证：在对方机器上运行本程序时用抓包工具（Wireshark）看本机与对方端口之间的流量，
+            只能看到 TLS 密文；即使解开 TLS，消息体也是 <code>enc: { iv, tag, data }</code> 的密文，没有明文内容。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>消息与文件</h4>
+          <p>
+            支持文字、表情、图片与文件。收到的图片 / 文件保存在「聊天文件目录」（点左侧头像右侧的文件夹图标查看），
+            每条消息右下角有「打开 / 定位」按钮；聊天记录可用右上角搜索框过滤，「⋯」里可以清空当前会话记录。
+          </p>
+        </section>
+
+        <section class="help-section">
+          <h4>常见问题</h4>
+          <p>
+            好友一直显示<b>离线</b>：说明 IP 与端口是通的，但对面不是本程序（端口被别的软件占用）；
+            显示<b>不可达</b>：网络不通或对方没开程序，检查防火墙是否放行该端口。
+            端口冲突可以在「我的资料」里换一个端口。
+          </p>
+        </section>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="helpDialog = false">知道了</el-button>
       </template>
     </el-dialog>
 
@@ -1181,12 +1732,65 @@ onUnmounted(() => {
 
 .me-card {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px;
   border-bottom: 1px solid var(--app-border);
   background: var(--app-panel-muted);
   flex: none;
+}
+
+.me-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 头像昵称下方的一排图标按钮 */
+.me-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.me-divider {
+  width: 1px;
+  height: 16px;
+  flex: none;
+  margin: 0 2px;
+  background: var(--app-border);
+}
+
+.me-badge :deep(.el-badge__content) {
+  z-index: 2;
+}
+
+.me-action {
+  /* 只留图标：宽度贴住图标，不要撑满整行 */
+  flex: none;
+  width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-panel);
+  color: var(--app-text-2);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.me-action:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.me-action.on {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
 }
 
 .avatar-btn {
@@ -1195,7 +1799,7 @@ onUnmounted(() => {
   background: transparent;
   padding: 0;
   cursor: pointer;
-  border-radius: 50%;
+  border-radius: 9px;
 }
 
 .avatar-edit {
@@ -1216,7 +1820,8 @@ onUnmounted(() => {
 .avatar {
   width: 32px;
   height: 32px;
-  border-radius: 50%;
+  /* 方形头像，稍微带一点圆角 */
+  border-radius: 7px;
   object-fit: cover;
   flex: none;
   background: var(--app-panel-muted);
@@ -1560,18 +2165,14 @@ onUnmounted(() => {
   border-radius: 10px;
   background: var(--app-panel-muted);
   border: 1px solid var(--app-border);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12.5px;
+  line-height: 1.65;
   color: var(--app-text);
   word-break: break-word;
   white-space: pre-wrap;
 }
 
-.message-row.out .bubble {
-  background: var(--app-primary);
-  border-color: var(--app-primary);
-  color: #fff;
-}
+/* 自己发的消息与对方消息用同一套气泡样式，只靠左右位置和自己的头像区分 */
 
 .bubble.emoji-only {
   background: transparent;
@@ -1641,16 +2242,6 @@ onUnmounted(() => {
   background: rgba(47, 111, 237, 0.2);
 }
 
-/* 自己发出的蓝色气泡上用半透明白，保证对比度 */
-.message-row.out .media-action {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-}
-
-.message-row.out .media-action:hover {
-  background: rgba(255, 255, 255, 0.32);
-}
-
 .file-box {
   display: flex;
   align-items: center;
@@ -1660,10 +2251,6 @@ onUnmounted(() => {
 
 .file-icon {
   color: var(--app-primary);
-}
-
-.message-row.out .file-icon {
-  color: #fff;
 }
 
 .file-info {
@@ -1935,5 +2522,258 @@ onUnmounted(() => {
 
 .request-state.failed {
   color: #d97706;
+}
+/* ---------------------------- 加密 / 跨网络 ---------------------------- */
+
+.crypto-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--app-text-3);
+  background: var(--app-panel-muted);
+}
+
+.crypto-tag.on {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.12);
+}
+
+.host-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.security-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+}
+
+.security-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--app-text-2);
+}
+
+.security-icon {
+  color: #16a34a;
+}
+
+.security-fp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.security-fp .mono {
+  word-break: break-all;
+}
+
+.mini-btn.frp-on {
+  color: #16a34a;
+}
+
+.frp-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+  font-size: 13px;
+}
+
+.frp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.frp-status.running .frp-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16);
+}
+
+.frp-status.starting .frp-dot {
+  background: #f59e0b;
+}
+
+.frp-status.error .frp-dot {
+  background: #ef4444;
+}
+
+.frp-status.error .frp-status-text {
+  color: #dc2626;
+}
+
+.frp-address {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.frp-address-text {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--app-panel-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frp-logs {
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: #0f172a;
+  color: #cbd5e1;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.frp-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ------------------------------ 使用说明 ------------------------------ */
+
+.help-body {
+  max-height: 60vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.help-section {
+  margin-bottom: 16px;
+}
+
+.help-section:last-child {
+  margin-bottom: 0;
+}
+
+.help-section h4 {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.help-section p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--app-text-2);
+}
+
+.help-section p.muted {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+
+.help-callout {
+  padding: 9px 12px;
+  border-radius: 8px;
+  border-left: 3px solid var(--app-primary);
+  background: var(--app-primary-soft);
+  color: var(--app-text) !important;
+}
+/* ------------------------------ 加密详情 ------------------------------ */
+
+.crypto-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--app-text-2);
+}
+
+.crypto-label {
+  width: 64px;
+  flex: none;
+  color: var(--app-text-3);
+}
+
+.crypto-row .warn {
+  color: #d97706;
+}
+
+.crypto-small {
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.crypto-key {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel-muted);
+}
+
+.crypto-key-value {
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: var(--app-text);
+}
+
+.crypto-key .el-button {
+  align-self: flex-start;
+}
+
+.separator {
+  height: 1px;
+  background: var(--app-border);
+  margin: 2px 0;
+}
+/* ------------------------------ 回到底部 ------------------------------ */
+
+.chat-main {
+  position: relative;
+}
+
+.to-bottom {
+  position: absolute;
+  right: 22px;
+  bottom: 132px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--app-border);
+  background: var(--app-panel);
+  color: var(--app-text-2);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+  cursor: pointer;
+  z-index: 3;
+}
+
+.to-bottom:hover {
+  color: var(--app-primary);
+  border-color: var(--app-primary);
 }
 </style>

@@ -10,6 +10,7 @@ import type {
   AppSettings,
   ChatFriend,
   ChatFriendInput,
+  ChatFrpConfig,
   ChatMessage,
   ChatProfile,
   ChatSendInput,
@@ -127,6 +128,14 @@ const api: DesktopApi = {
     openChatDir: () => ipcRenderer.invoke('chat:open-dir') as Promise<void>,
     openFile: (filePath: string) => ipcRenderer.invoke('chat:open-file', filePath) as Promise<void>,
     revealFile: (filePath: string) => ipcRenderer.invoke('chat:reveal-file', filePath) as Promise<void>,
+    saveFrp: (patch: Partial<ChatFrpConfig>) =>
+      ipcRenderer.invoke('chat:frp-save', patch) as Promise<ChatState>,
+    startFrp: () => ipcRenderer.invoke('chat:frp-start') as Promise<ChatState>,
+    stopFrp: () => ipcRenderer.invoke('chat:frp-stop') as Promise<ChatState>,
+    chooseFrpc: () =>
+      ipcRenderer.invoke('chat:frp-choose') as Promise<{ canceled: boolean; path?: string }>,
+    trustPeerCert: (friendId: string) =>
+      ipcRenderer.invoke('chat:trust-cert', friendId) as Promise<ChatState>,
     onMessage: (callback) => {
       const handler = (_event: IpcRendererEvent, message: ChatMessage): void => callback(message)
       ipcRenderer.on('chat:message', handler)

@@ -1,32 +1,63 @@
 import { BrowserWindow, Notification } from 'electron'
 import { promises as fsp } from 'node:fs'
-import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer as createHttpsServer, request as httpsRequest } from 'node:https'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Server } from 'node:https'
+import type { TLSSocket } from 'node:tls'
 import { createConnection } from 'node:net'
-import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import type {
   ChatFriend,
   ChatFriendInput,
   ChatFriendRequest,
+  ChatFrpConfig,
   ChatMessage,
   ChatMessageKind,
+  ChatNetworkInfo,
   ChatPeerStatus,
   ChatProfile,
   ChatRequestStatus,
+  ChatSecurityInfo,
   ChatState
 } from '@shared/types'
+import {
+  chatIdentity,
+  identityFile,
+  isValidPeerKey,
+  normalizeFingerprint,
+  openPayload,
+  sealPayload,
+  sessionKeyPrint,
+  tlsOptions
+} from './chatCrypto'
+import {
+  bootstrapFrp,
+  frpIsActive,
+  frpPublicAddress,
+  frpState,
+  loadFrp,
+  saveFrp,
+  shutdownFrp,
+  startFrp,
+  stopFrp,
+  syncFrpPort
+} from './frp'
 import { configDir } from './store'
+import { isLocalAddress, listNetworkOptions, rankedAddress, routeAddress } from './netInfo'
 
 /**
- * 本地聊天：局域网内的点对点聊天。
+ * 本地聊天：点对点聊天（局域网直连，或经 FRP 跨网络）。
  *
- * - 主进程在指定端口起一个 HTTP 服务（`POST /chat/api`）接收消息与资料变更；
+ * - 主进程在指定端口起一个 **HTTPS** 服务（`POST /chat/api`）接收消息与资料变更；
+ *   证书是首次启动自动生成的自签名证书，对方首次连接时记住指纹（TOFU）；
+ * - 消息正文再用 X25519 协商出来的 AES-256-GCM 密钥端到端加密，
+ *   即使经过 FRP 服务器转发也读不到内容；
  * - 好友状态用「TCP 是否可连 + 接口是否是本程序」两步判断：
  *     TCP 连不上 → 不可达；能连上但接口不是本程序 → 离线；返回了本程序的标记 → 在线；
  * - 好友、消息、自己的资料、附件保存目录全部写进 `chat.json`，方便整体迁移。
  */
 
-const STORE_VERSION = 1
+const STORE_VERSION = 2
 const APP_MARKER = 'devtoolbox-chat'
 /** 默认端口：挑一个少见、不与常见服务冲突的端口 */
 export const DEFAULT_CHAT_PORT = 45871
@@ -51,6 +82,14 @@ interface PeerBrief {
   nickname: string
   avatar: string
   port: number
+  /** 对方 X25519 公钥，用于端到端加密 */
+  pub: string
+  /**
+   * 对方希望别人用它来连自己的地址（目前只有开了 FRP 才会填）。
+   * 走 FRP 时接收方看到的来源 IP 是本机 frpc（往往是 127.0.0.1），
+   * 端口也是对端的本地端口，直接用来源地址回连会连到自己，所以要用这里上报的对外地址。
+   */
+  host: string
 }
 
 interface IncomingAttachment {
@@ -104,21 +143,37 @@ function hashCode(text: string): number {
 
 /** 本机局域网 IPv4，用于告诉好友该连哪个地址 */
 export function localAddress(): string {
-  const nets = networkInterfaces()
-  const candidates: string[] = []
-  for (const list of Object.values(nets)) {
-    for (const item of list ?? []) {
-      if (item.family === 'IPv4' && !item.internal && !item.address.startsWith('169.254.')) {
-        candidates.push(item.address)
-      }
-    }
+  const manual = manualHost()
+  if (manual && isLocalAddress(manual)) return manual
+  if (autoHost) return autoHost
+  return rankedAddress()
+}
+
+/** 用户手动指定的网卡地址（空字符串表示自动） */
+function manualHost(): string {
+  return cache ? str(cache.me.host).trim() : ''
+}
+
+/** 自动探测到的地址（默认路由出口），启动时刷新一次 */
+let autoHost = ''
+
+export async function refreshNetworkInfo(): Promise<void> {
+  const detected = await routeAddress()
+  autoHost = detected || rankedAddress()
+}
+
+function networkInfo(): ChatNetworkInfo {
+  const manual = manualHost()
+  const valid = Boolean(manual) && isLocalAddress(manual)
+  const options = listNetworkOptions()
+  // 手动选的网卡如果已经不在（拔了网线 / 虚拟网卡消失），状态里也照样列出来，方便用户看到
+  const listed = valid || !manual ? options : [{ address: manual, iface: '（已失效）', virtual: false }, ...options]
+  return {
+    current: valid ? manual : autoHost || rankedAddress(),
+    auto: autoHost || rankedAddress(),
+    manual: valid,
+    options: listed
   }
-  // 优先 192.168 / 10. / 172.16-31 这类内网地址
-  const isPrivate = (address: string): boolean =>
-    address.startsWith('192.168.') ||
-    address.startsWith('10.') ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(address)
-  return candidates.find(isPrivate) ?? candidates[0] ?? '127.0.0.1'
 }
 
 /* ------------------------------------------------------------------ */
@@ -192,7 +247,8 @@ function createDefaultStore(): ChatStore {
       nickname,
       avatar: generateAvatar(`${id}-${nickname}`),
       port: DEFAULT_CHAT_PORT,
-      host: localAddress()
+      // 空字符串表示「自动选择网卡」，不要在这里写死地址，否则换网络后一直用旧地址
+      host: ''
     },
     friends: [],
     requests: [],
@@ -219,6 +275,7 @@ function normalizeRequest(value: unknown, now: number): ChatFriendRequest | null
     ip,
     port: clamp(Math.round(num(value.port, DEFAULT_CHAT_PORT)), 1, 65535),
     remark: str(value.remark).slice(0, 40),
+    pub: isValidPeerKey(str(value.pub)) ? str(value.pub) : undefined,
     status,
     createdAt: num(value.createdAt, now),
     respondedAt: num(value.respondedAt, 0),
@@ -265,6 +322,8 @@ function normalizeFriend(value: unknown, now: number): ChatFriend | null {
     avatar: str(value.avatar),
     status,
     lastSeenAt: num(value.lastSeenAt, 0),
+    pub: isValidPeerKey(str(value.pub)) ? str(value.pub) : undefined,
+    certPrint: str(value.certPrint) || undefined,
     createdAt: num(value.createdAt, now),
     updatedAt: num(value.updatedAt, now)
   }
@@ -276,12 +335,16 @@ function normalizeStore(raw: unknown): ChatStore {
   const now = Date.now()
 
   const meRaw = isObject(raw.me) ? raw.me : {}
+  // v2 起 me.host 表示「用户手动选的网卡地址」，空字符串 = 自动；
+  // 更早的版本里它是自动算出来的地址，直接读进来会把人锁死在旧网卡上，所以升级时清空
+  const version = num(raw.version, 1)
+  const savedHost = version >= 2 ? str(meRaw.host).trim().slice(0, 64) : ''
   const me: ChatProfile = {
     id: str(meRaw.id) || base.me.id,
     nickname: str(meRaw.nickname).slice(0, 40) || base.me.nickname,
     avatar: str(meRaw.avatar) || base.me.avatar,
     port: clamp(Math.round(num(meRaw.port, base.me.port)), 1, 65535),
-    host: localAddress()
+    host: savedHost
   }
 
   const friends = Array.isArray(raw.friends)
@@ -353,10 +416,7 @@ async function persist(): Promise<void> {
 }
 
 async function loadStore(): Promise<ChatStore> {
-  if (cache) {
-    cache.me.host = localAddress()
-    return cache
-  }
+  if (cache) return cache
   const raw = await readJsonIfExists(chatDataFile())
   const existed = raw !== null
   cache = normalizeStore(raw)
@@ -373,17 +433,34 @@ let listening = false
 let portError = ''
 let currentPort = 0
 
+function securityInfo(): ChatSecurityInfo {
+  const identity = chatIdentity()
+  return {
+    https: listening,
+    fingerprint: identity.fingerprint,
+    subject: identity.subject,
+    identityFile: identityFile()
+  }
+}
+
 export function chatStateSync(): ChatState {
   const store = cache ?? createDefaultStore()
   return {
     me: { ...store.me, host: localAddress() },
-    friends: store.friends.map((item) => ({ ...item })),
+    friends: store.friends.map((item) => ({
+      ...item,
+      // 会话密钥指纹：双方显示的应该一模一样，用来确认端到端加密真的生效
+      keyPrint: item.pub ? sessionKeyPrint(item.pub) : ''
+    })),
     requests: store.requests.map((item) => ({ ...item })),
     messages: store.messages.map((item) => ({ ...item })),
     dataFile: chatDataFile(),
     chatDir: store.chatDir,
     listening,
-    portError
+    portError,
+    security: securityInfo(),
+    frp: frpState(),
+    network: networkInfo()
   }
 }
 
@@ -438,8 +515,35 @@ function normalizeRemoteIp(value: string | undefined): string {
   return value.startsWith('::ffff:') ? value.slice(7) : value
 }
 
+function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase()
+  return !value || value === 'localhost' || value === '::1' || /^127\./.test(value) || value === '0.0.0.0'
+}
+
+/**
+ * 我在别人眼里应该是什么地址。
+ * 开了 FRP 就把「对外地址」报出去，否则只报端口、让对方用它观察到的来源 IP。
+ */
 function peerBrief(me: ChatProfile): PeerBrief {
-  return { id: me.id, nickname: me.nickname, avatar: me.avatar, port: me.port }
+  const publicAddress = frpPublicAddress()
+  if (publicAddress) {
+    const index = publicAddress.lastIndexOf(':')
+    const host = publicAddress.slice(0, index)
+    const port = Number(publicAddress.slice(index + 1))
+    if (host && Number.isFinite(port) && port > 0) {
+      return { id: me.id, nickname: me.nickname, avatar: me.avatar, port, pub: chatIdentity().pub, host }
+    }
+  }
+  return { id: me.id, nickname: me.nickname, avatar: me.avatar, port: me.port, pub: chatIdentity().pub, host: '' }
+}
+
+/** 把对端上报的地址和连接来源地址合起来，得到「该回连到哪里」 */
+function peerAddress(from: PeerBrief, remoteIp: string, fallbackPort: number): { ip: string; port: number } {
+  const host = str(from.host).trim()
+  return {
+    ip: isLoopbackHost(host) ? remoteIp : host,
+    port: clamp(Math.round(num(from.port, fallbackPort)), 1, 65535)
+  }
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -470,7 +574,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     id: str(fromRaw.id),
     nickname: str(fromRaw.nickname).slice(0, 40),
     avatar: str(fromRaw.avatar),
-    port: clamp(Math.round(num(fromRaw.port, 0)), 0, 65535)
+    port: clamp(Math.round(num(fromRaw.port, 0)), 0, 65535),
+    pub: str(fromRaw.pub),
+    host: str(fromRaw.host).trim().slice(0, 200)
+  }
+
+  // 消息正文是端到端加密的：先用对方的公钥解出来
+  let payload = isObject(body.payload) ? body.payload : null
+  if (isObject(body.enc)) {
+    const opened = openPayload(from.pub, body.enc)
+    if (!isObject(opened)) {
+      sendJson(res, 400, { ok: false, error: 'decrypt failed' })
+      return
+    }
+    payload = opened
   }
 
   switch (str(body.action)) {
@@ -482,29 +599,29 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 200, { ok: true })
       return
     case 'deliver': {
-      if (!isObject(body.payload)) {
+      if (!isObject(payload)) {
         sendJson(res, 400, { ok: false, error: 'bad payload' })
         return
       }
-      await receiveMessage(from, remoteIp, body.payload)
+      await receiveMessage(from, remoteIp, payload)
       sendJson(res, 200, { ok: true })
       return
     }
     case 'friend-request': {
-      if (!isObject(body.payload)) {
+      if (!isObject(payload)) {
         sendJson(res, 400, { ok: false, error: 'bad payload' })
         return
       }
-      await receiveFriendRequest(from, remoteIp, body.payload)
+      await receiveFriendRequest(from, remoteIp, payload)
       sendJson(res, 200, { ok: true })
       return
     }
     case 'friend-request-result': {
-      if (!isObject(body.payload)) {
+      if (!isObject(payload)) {
         sendJson(res, 400, { ok: false, error: 'bad payload' })
         return
       }
-      await applyFriendRequestResult(from, remoteIp, body.payload)
+      await applyFriendRequestResult(from, remoteIp, payload)
       sendJson(res, 200, { ok: true })
       return
     }
@@ -521,7 +638,7 @@ export async function startChatServer(port: number): Promise<void> {
   await stopChatServer()
 
   portError = ''
-  const instance = createServer((req, res) => {
+  const instance = createHttpsServer(tlsOptions(), (req, res) => {
     void handleRequest(req, res).catch((error: unknown) => {
       console.error('[chat] 处理请求失败', error)
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: 'internal error' })
@@ -553,7 +670,7 @@ export async function startChatServer(port: number): Promise<void> {
   })
 
   store.me.port = target
-  store.me.host = localAddress()
+  // 这里只更新端口；me.host 是用户手选的网卡地址（空 = 自动），不要覆盖
   await persist()
   broadcastState()
 }
@@ -592,16 +709,18 @@ function postJson(
   port: number,
   body: unknown,
   timeoutMs = 8000
-): Promise<{ status: number; json: Record<string, unknown> | null }> {
+): Promise<{ status: number; json: Record<string, unknown> | null; certPrint: string }> {
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(JSON.stringify(body), 'utf8')
-    const req = httpRequest(
+    const req = httpsRequest(
       {
         host: ip,
         port,
         path: '/chat/api',
         method: 'POST',
         timeout: timeoutMs,
+        // 自签名证书：先连上再看指纹（首次见面记住，之后比对）
+        rejectUnauthorized: false,
         headers: {
           'Content-Type': 'application/json; charset=utf-8',
           'Content-Length': payload.length,
@@ -610,14 +729,16 @@ function postJson(
       },
       (res) => {
         const chunks: Buffer[] = []
+        const peer = (res.socket as TLSSocket).getPeerCertificate()
+        const certPrint = normalizeFingerprint(peer?.fingerprint256)
         res.on('data', (chunk: Buffer) => chunks.push(chunk))
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8')
           try {
             const json = JSON.parse(text) as unknown
-            resolve({ status: res.statusCode ?? 0, json: isObject(json) ? json : null })
+            resolve({ status: res.statusCode ?? 0, json: isObject(json) ? json : null, certPrint })
           } catch {
-            resolve({ status: res.statusCode ?? 0, json: null })
+            resolve({ status: res.statusCode ?? 0, json: null, certPrint })
           }
         })
       }
@@ -647,7 +768,9 @@ async function probePeer(
           id: str(profile.id),
           nickname: str(profile.nickname).slice(0, 40),
           avatar: str(profile.avatar),
-          port: clamp(Math.round(num(profile.port, port)), 1, 65535)
+          port: clamp(Math.round(num(profile.port, port)), 1, 65535),
+          pub: str(profile.pub),
+          host: str(profile.host).trim().slice(0, 200)
         }
       }
     }
@@ -668,6 +791,14 @@ function matchFriend(store: ChatStore, from: PeerBrief, remoteIp: string): ChatF
     const byId = store.friends.find((item) => item.id === from.id)
     if (byId) return byId
   }
+  // 走了 FRP 的对端，来源 IP 是本机 frpc，按它上报的对外地址匹配
+  const host = str(from.host).trim()
+  if (!isLoopbackHost(host)) {
+    const byHost = store.friends.find(
+      (item) => item.ip === host && (!from.port || item.port === from.port)
+    )
+    if (byHost) return byHost
+  }
   if (!remoteIp) return null
   const byPort = store.friends.find((item) => item.ip === remoteIp && (!from.port || item.port === from.port))
   if (byPort) return byPort
@@ -684,6 +815,18 @@ async function refreshFriendRecord(friend: ChatFriend): Promise<ChatFriend> {
     if (result.profile) {
       if (result.profile.nickname) friend.nickname = result.profile.nickname
       if (result.profile.avatar) friend.avatar = result.profile.avatar
+      if (isValidPeerKey(result.profile.pub)) friend.pub = result.profile.pub
+      // 对方开了 FRP：以前可能记成了 127.0.0.1（会连着连到自己），这里顺手纠正成对外地址
+      const host = result.profile.host
+      if (!isLoopbackHost(host) && isLoopbackHost(friend.ip)) {
+        const reachable = await tcpReachable(host, result.profile.port)
+        if (reachable) {
+          friend.ip = host
+          friend.port = result.profile.port
+          await persist()
+          return friend
+        }
+      }
       // 对方换了端口时，确认新端口真的能连上再更新
       if (result.profile.port && result.profile.port !== friend.port) {
         const reachable = await tcpReachable(friend.ip, result.profile.port)
@@ -760,13 +903,19 @@ interface PeerInfo {
   ip: string
   port: number
   remark: string
+  pub?: string
 }
 
 /**
  * 把申请通过的好友落到好友列表。
  * 重新添加同一个对端时按新好友处理：清掉它之前的聊天记录，从空白会话开始。
+ *
+ * 注意：如果对方的身份就是我自己（同一份配置起的另一个实例），绝不能落成好友，
+ * 否则列表里会出现「自己」。这里返回 null 由调用方处理。
  */
-function createFriendFromPeer(store: ChatStore, peer: PeerInfo): ChatFriend {
+function createFriendFromPeer(store: ChatStore, peer: PeerInfo): ChatFriend | null {
+  if (peer.peerId && peer.peerId === store.me.id) return null
+
   const now = Date.now()
   const existing = store.friends.find(
     (item) => (peer.peerId && item.id === peer.peerId) || (item.ip === peer.ip && item.port === peer.port)
@@ -787,6 +936,7 @@ function createFriendFromPeer(store: ChatStore, peer: PeerInfo): ChatFriend {
     avatar: peer.avatar,
     status: 'online',
     lastSeenAt: now,
+    pub: isValidPeerKey(peer.pub) ? peer.pub : undefined,
     createdAt: now,
     updatedAt: now
   }
@@ -825,6 +975,12 @@ export async function sendFriendRequest(input: ChatFriendInput): Promise<ChatSta
   if (probe.status !== 'online' || !probe.profile) {
     throw new Error('对方当前不在线（或端口不通），无法发送好友申请')
   }
+  // 同一份配置下启动的多个实例共用一份聊天身份，加过来就会「好友变成自己」
+  if (probe.profile.id && probe.profile.id === store.me.id) {
+    throw new Error(
+      '这是你自己的聊天身份（同一份配置启动的另一个实例），不能加为好友。想在同一台机器上测试，请用两份独立的安装 / 数据目录'
+    )
+  }
 
   const now = Date.now()
   const request: ChatFriendRequest = {
@@ -837,6 +993,7 @@ export async function sendFriendRequest(input: ChatFriendInput): Promise<ChatSta
     ip,
     port,
     remark: str(input?.remark).trim().slice(0, 40),
+    pub: isValidPeerKey(probe.profile.pub) ? probe.profile.pub : undefined,
     status: 'pending',
     createdAt: now,
     respondedAt: 0,
@@ -880,12 +1037,20 @@ async function receiveFriendRequest(
   payload: Record<string, unknown>
 ): Promise<void> {
   const store = await loadStore()
-  const ip = remoteIp || localAddress()
-  const port = clamp(Math.round(num(payload.port ?? from.port, DEFAULT_CHAT_PORT)), 1, 65535)
+  // 走 FRP 的对端要用它上报的对外地址，否则会记成 127.0.0.1（连回自己）
+  const address = peerAddress(from, remoteIp || localAddress(), DEFAULT_CHAT_PORT)
+  const ip = address.ip
+  const port = address.port
   const remark = str(payload.remark).slice(0, 40)
   /** 对方的申请 id —— 回执时必须原样带上，对方才能对上自己的记录 */
   const remoteId = str(payload.requestId)
   const now = Date.now()
+
+  // 对方就是我自己（同一份配置的另一个实例）：不记录申请，直接回执拒绝
+  if (from.id && from.id === store.me.id) {
+    if (remoteId) await replyFriendRequest(ip, port, remoteId, false)
+    return
+  }
 
   // 已经是好友时直接回执「已同意」，省得对方一直等
   const already = store.friends.find(
@@ -919,6 +1084,7 @@ async function receiveFriendRequest(
     existing.avatar = from.avatar || existing.avatar
     existing.remark = remark || existing.remark
     existing.remoteId = remoteId || existing.remoteId
+    existing.pub = isValidPeerKey(from.pub) ? from.pub : existing.pub
   } else {
     store.requests.push({
       id: `req-${randomSuffix()}`,
@@ -928,8 +1094,9 @@ async function receiveFriendRequest(
       nickname: from.nickname,
       avatar: from.avatar,
       ip,
-      port: from.port || port,
+      port,
       remark,
+      pub: isValidPeerKey(from.pub) ? from.pub : undefined,
       status: 'pending',
       createdAt: now,
       respondedAt: 0,
@@ -952,6 +1119,17 @@ export async function respondFriendRequest(id: string, accepted: boolean): Promi
   if (!request) throw new Error('申请不存在或已被删除')
   if (request.status !== 'pending') throw new Error('这条申请已经处理过了')
 
+  // 对方的身份就是我自己（同一份配置的另一个实例）：不能变成好友，直接把申请作废
+  if (accepted && request.peerId && request.peerId === store.me.id) {
+    request.status = 'rejected'
+    request.respondedAt = Date.now()
+    request.message = '对方与你是同一份聊天身份，无法互为好友'
+    await persist()
+    broadcastState()
+    void replyFriendRequest(request.ip, request.port, request.remoteId, false)
+    throw new Error('对方与你是同一位用户（同一份配置的另一个实例），不能加为好友')
+  }
+
   request.status = accepted ? 'accepted' : 'rejected'
   request.respondedAt = Date.now()
   request.message = accepted ? '已同意' : '已拒绝'
@@ -963,7 +1141,8 @@ export async function respondFriendRequest(id: string, accepted: boolean): Promi
       avatar: request.avatar,
       ip: request.ip,
       port: request.port,
-      remark: request.remark
+      remark: request.remark,
+      pub: request.pub
     })
   }
 
@@ -1014,13 +1193,15 @@ async function applyFriendRequestResult(
   // 已经处理过这条申请：忽略重复回执
   if (request && request.status !== 'pending') return
 
+  const address = peerAddress(from, remoteIp || request?.ip || '', request?.port ?? DEFAULT_CHAT_PORT)
   const peer: PeerInfo = {
     peerId: from.id || request?.peerId || '',
     nickname: from.nickname || request?.nickname || '',
     avatar: from.avatar || request?.avatar || '',
-    ip: remoteIp || request?.ip || '',
-    port: clamp(Math.round(num(from.port || request?.port, DEFAULT_CHAT_PORT)), 1, 65535),
-    remark: request?.remark || ''
+    ip: address.ip || request?.ip || '',
+    port: address.port,
+    remark: request?.remark || '',
+    pub: isValidPeerKey(from.pub) ? from.pub : request?.pub
   }
   if (!peer.ip) return
 
@@ -1028,6 +1209,7 @@ async function applyFriendRequestResult(
     request.status = accepted ? 'accepted' : 'rejected'
     request.respondedAt = Date.now()
     request.message = accepted ? '对方已同意' : '对方已拒绝'
+    if (peer.pub) request.pub = peer.pub
   } else if (accepted) {
     // 本地已经没有这条申请（例如记录被清理过）：对方说同意了，照样把好友加回来
     store.requests.push({
@@ -1040,6 +1222,7 @@ async function applyFriendRequestResult(
       ip: peer.ip,
       port: peer.port,
       remark: '',
+      pub: peer.pub,
       status: 'accepted',
       createdAt: Date.now(),
       respondedAt: Date.now(),
@@ -1051,7 +1234,14 @@ async function applyFriendRequestResult(
   }
 
   if (accepted) {
-    createFriendFromPeer(store, peer)
+    const created = createFriendFromPeer(store, peer)
+    if (!created) {
+      // 对方就是我自己：不要把自己加成好友，标成拒绝并说明原因
+      if (request) {
+        request.status = 'rejected'
+        request.message = '对方与你是同一份聊天身份，未添加为好友'
+      }
+    }
   }
 
   await persist()
@@ -1136,7 +1326,7 @@ export async function dismissRequest(id: string): Promise<ChatState> {
 /* ------------------------------------------------------------------ */
 
 export async function updateProfile(
-  patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>
+  patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port' | 'host'>>
 ): Promise<ChatState> {
   const store = await loadStore()
   const oldPort = store.me.port
@@ -1147,11 +1337,19 @@ export async function updateProfile(
   }
   if (patch.avatar !== undefined) store.me.avatar = str(patch.avatar)
   if (patch.port !== undefined) store.me.port = clamp(Math.round(num(patch.port, oldPort)), 1, 65535)
+  if (patch.host !== undefined) {
+    const host = str(patch.host).trim()
+    // 空字符串 = 回到自动选择；否则必须是当前网卡上的地址
+    if (host && !isLocalAddress(host)) throw new Error('这个地址不在本机网卡上，无法使用')
+    store.me.host = host
+  }
 
   await persist()
 
   if (store.me.port !== oldPort) {
     await startChatServer(store.me.port)
+    // 端口变了，FRP 的本地端口跟着改
+    await syncFrpPort(store.me.port)
   }
   await broadcastProfile()
   broadcastState()
@@ -1180,7 +1378,8 @@ async function broadcastProfile(): Promise<void> {
 }
 
 /**
- * 收到好友的资料变更广播。地址用连接的来源 IP，避免对端伪造。
+ * 收到好友的资料变更广播。
+ * 地址优先用对方上报的对外地址（开了 FRP 时才对），否则用连接的来源 IP，避免对端伪造。
  */
 async function applyPeerProfile(from: PeerBrief, remoteIp: string): Promise<void> {
   const store = await loadStore()
@@ -1189,8 +1388,10 @@ async function applyPeerProfile(from: PeerBrief, remoteIp: string): Promise<void
 
   if (from.nickname) friend.nickname = from.nickname
   if (from.avatar) friend.avatar = from.avatar
-  if (remoteIp) friend.ip = remoteIp
-  if (from.port > 0) friend.port = from.port
+  if (isValidPeerKey(from.pub)) friend.pub = from.pub
+  const address = peerAddress(from, remoteIp, friend.port)
+  if (address.ip) friend.ip = address.ip
+  friend.port = address.port
   friend.status = 'online'
   friend.lastSeenAt = Date.now()
   friend.updatedAt = Date.now()
@@ -1318,15 +1519,17 @@ async function receiveMessage(from: PeerBrief, remoteIp: string, payload: Record
 
   // 陌生人发来的消息也保留下来，自动加为好友
   if (!friend) {
+    const address = peerAddress(from, remoteIp, DEFAULT_CHAT_PORT)
     friend = {
       id: from.id || `f-${randomSuffix()}`,
-      remark: from.nickname || remoteIp || '新好友',
-      ip: remoteIp || '0.0.0.0',
-      port: from.port || DEFAULT_CHAT_PORT,
+      remark: from.nickname || address.ip || '新好友',
+      ip: address.ip || '0.0.0.0',
+      port: address.port,
       nickname: from.nickname,
       avatar: from.avatar,
       status: 'online',
       lastSeenAt: now,
+      pub: isValidPeerKey(from.pub) ? from.pub : undefined,
       createdAt: now,
       updatedAt: now
     }
@@ -1338,6 +1541,12 @@ async function receiveMessage(from: PeerBrief, remoteIp: string, payload: Record
   friend.updatedAt = now
   if (from.nickname) friend.nickname = from.nickname
   if (from.avatar) friend.avatar = from.avatar
+  if (isValidPeerKey(from.pub)) friend.pub = from.pub
+  // 对方开了 FRP 且本地记的是回环地址：顺手纠正成对外地址，消息才能发得出去
+  if (!isLoopbackHost(from.host) && isLoopbackHost(friend.ip)) {
+    friend.ip = from.host
+    if (from.port > 0) friend.port = from.port
+  }
 
   const kind: ChatMessageKind = payload.kind === 'image' || payload.kind === 'file' ? payload.kind : 'text'
   const incoming = payload as unknown as IncomingAttachment
@@ -1378,13 +1587,24 @@ async function receiveMessage(from: PeerBrief, remoteIp: string, payload: Record
 
 async function deliverToFriend(friend: ChatFriend, payload: Record<string, unknown>): Promise<string> {
   const store = await loadStore()
+  const from = peerBrief(store.me)
+  // 有对方公钥就端到端加密；没有（老版本 / 还没拿到资料）则退化成 HTTPS 明文
+  const body = isValidPeerKey(friend.pub)
+    ? { action: 'deliver', from, enc: sealPayload(friend.pub as string, payload) }
+    : { action: 'deliver', from, payload }
+
   try {
-    const res = await postJson(
-      friend.ip,
-      friend.port,
-      { action: 'deliver', from: peerBrief(store.me), payload },
-      12000
-    )
+    const res = await postJson(friend.ip, friend.port, body, 12000)
+    if (res.certPrint) {
+      if (!friend.certPrint) {
+        // 首次连接：记住对方证书指纹
+        friend.certPrint = res.certPrint
+        await persist()
+        broadcastState()
+      } else if (normalizeFingerprint(friend.certPrint) !== res.certPrint) {
+        return '对方的 HTTPS 证书与上次不一致，已拒绝发送（可在好友菜单里信任新证书）'
+      }
+    }
     if (res.status >= 400) return `对方返回 ${res.status}`
     return ''
   } catch (error) {
@@ -1540,8 +1760,71 @@ export async function setChatDir(dir: string): Promise<ChatState> {
   return chatStateSync()
 }
 
-/** 应用启动时调用：加载数据并开始监听 */
+/** 应用启动时调用：加载数据并开始监听（HTTPS），启用跨网络时顺带连上 FRP */
 export async function bootstrapChat(): Promise<void> {
+  // 先探测一次「默认路由出口」的地址，多网卡时才不会挑到连不通的虚拟网卡
+  await refreshNetworkInfo()
   const store = await loadStore()
   await startChatServer(store.me.port)
+  await bootstrapFrp()
+  broadcastState()
 }
+
+/* ------------------------------------------------------------------ */
+/* 跨网络（FRP）与证书信任                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 保存 FRP 配置。
+ *
+ * 只有「当前正连着」时才需要重启 frpc 去应用新配置；
+ * 已经断开（用户点了「断开」）就绝不能因为 enabled=true 又自动连回去 —— 否则断开按钮看上去失效。
+ */
+export async function saveFrpConfig(patch: Partial<ChatFrpConfig>): Promise<ChatState> {
+  const active = frpIsActive()
+  await saveFrp(patch)
+  const next = await loadFrp()
+  if (active && next.enabled && next.serverAddr && next.remotePort) {
+    // 连接参数变了：先停再起，避免两个 frpc 抢同一个映射
+    void stopFrp()
+      .then(() => startFrp())
+      .finally(() => broadcastState())
+  } else {
+    await stopFrpIfDisabled(next)
+  }
+  broadcastState()
+  return chatStateSync()
+}
+
+/** 配置里已经关掉跨网络时，确保 frpc 真的退出了 */
+async function stopFrpIfDisabled(config: ChatFrpConfig): Promise<void> {
+  if (config.enabled) return
+  if (!frpIsActive()) return
+  await stopFrp()
+}
+
+export async function startFrpClient(): Promise<ChatState> {
+  await startFrp()
+  broadcastState()
+  return chatStateSync()
+}
+
+export async function stopFrpClient(): Promise<ChatState> {
+  await stopFrp()
+  broadcastState()
+  return chatStateSync()
+}
+
+/** 对方重装程序后证书会变，这里清掉记住的指纹，下次发送重新信任 */
+export async function trustPeerCert(friendId: string): Promise<ChatState> {
+  const store = await loadStore()
+  const friend = store.friends.find((item) => item.id === friendId)
+  if (!friend) throw new Error('好友不存在')
+  friend.certPrint = undefined
+  friend.updatedAt = Date.now()
+  await persist()
+  broadcastState()
+  return chatStateSync()
+}
+
+export { shutdownFrp }

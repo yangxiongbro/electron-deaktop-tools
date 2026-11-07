@@ -11,6 +11,7 @@ import type {
   ApiRequestSaveResult,
   ApiAttemptResult,
   ChatFriendInput,
+  ChatFrpConfig,
   ChatMessage,
   ChatProfile,
   ChatSendInput,
@@ -57,11 +58,15 @@ import {
   removeFriend,
   resendPendingRequests,
   respondFriendRequest,
+  saveFrpConfig,
   sendFile,
   sendFriendRequest,
   sendImage,
   sendText,
   setChatDir,
+  startFrpClient,
+  stopFrpClient,
+  trustPeerCert,
   updateFriend,
   updateProfile
 } from './chat'
@@ -441,6 +446,31 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('chat:clear-history', (_event, friendId: string) => clearHistory(friendId))
 
   ipcMain.handle('chat:image-data', (_event, filePath: string) => readImageDataUrl(filePath))
+
+  /* --------------------------- 跨网络（FRP） --------------------------- */
+
+  ipcMain.handle('chat:frp-save', (_event, patch: Partial<ChatFrpConfig>) => saveFrpConfig(patch ?? {}))
+
+  ipcMain.handle('chat:frp-start', () => startFrpClient())
+
+  ipcMain.handle('chat:frp-stop', () => stopFrpClient())
+
+  ipcMain.handle('chat:frp-choose', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const args = {
+      title: '选择 frpc 可执行文件',
+      properties: ['openFile' as const],
+      filters:
+        process.platform === 'win32' ? [{ name: 'frpc', extensions: ['exe'] }] : [{ name: '所有文件', extensions: ['*'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+    const chosen = result.filePaths[0]
+    await saveFrpConfig({ frpcPath: chosen })
+    return { canceled: false, path: chosen }
+  })
+
+  ipcMain.handle('chat:trust-cert', (_event, friendId: string) => trustPeerCert(friendId))
 
   ipcMain.handle('chat:choose-dir', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)

@@ -12,6 +12,15 @@ files:
   - '!**/*.map'
   - '!**/{.eslintrc,.editorconfig,.prettierrc,README.md,README}'
 
+# 跨网络聊天用的 frpc：把可执行文件放进 resources/frp（见该目录的 README），
+# 打包后位于 <安装目录>/resources/frp/frpc(.exe)，程序会自动找到它
+extraResources:
+  - from: resources/frp
+    to: frp
+    filter:
+      - '**/*'
+      - '!README.md'
+
 asar: true
 compression: normal
 electronDownload:

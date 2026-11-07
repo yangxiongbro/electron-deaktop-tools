@@ -80,6 +80,9 @@ export function setupSmokeCapture(win: BrowserWindow): void {
       try {
         await fsp.mkdir(outputDir, { recursive: true })
         await wait(1500)
+        // 侧栏默认收起，文档截图统一用展开状态，最后再单独截一张收起状态
+        await runScript(`window.__toolbox && window.__toolbox.setCollapsed(false)`)
+        await wait(600)
 
         for (const tool of tools) {
           await runScript(`window.__toolbox && window.__toolbox.setTool(${JSON.stringify(tool)})`)
@@ -123,6 +126,36 @@ export function setupSmokeCapture(win: BrowserWindow): void {
         await runScript(`document.querySelector('.friend-badge button')?.click()`)
         await wait(900)
         await capture('chat-requests.png')
+        await closeVisibleDialog()
+
+        // 跨网络（FRP）与安全信息
+        await runScript(`document.querySelectorAll('.me-actions .me-action')[0]?.click()`)
+        await wait(900)
+        await capture('chat-frp.png')
+        await closeVisibleDialog()
+        await runScript(`document.querySelector('.me-card .avatar-btn')?.click()`)
+        await wait(900)
+        await capture('chat-security.png')
+        await closeVisibleDialog()
+
+        // 使用说明
+        await runScript(`document.querySelectorAll('.me-actions .me-action')[2]?.click()`)
+        await wait(900)
+        await capture('chat-help.png')
+        await closeVisibleDialog()
+
+        // 加密详情（好友菜单 → 加密详情）
+        await runScript(`document.querySelector('.chat-header button[title="更多"]')?.click()`)
+        await wait(700)
+        await runScript(`(() => {
+          const item = Array.from(document.querySelectorAll('.el-dropdown-menu__item')).find(
+            (el) => (el.textContent || '').includes('加密详情')
+          )
+          if (item) item.click()
+          return Boolean(item)
+        })()`)
+        await wait(900)
+        await capture('chat-crypto.png')
         await closeVisibleDialog()
 
         // Markdown 文档内搜索：预览模式下高亮命中文字

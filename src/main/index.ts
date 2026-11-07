@@ -2,7 +2,7 @@ import { app, BrowserWindow, Menu, screen, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc'
-import { bootstrapChat, stopChatServer } from './chat'
+import { bootstrapChat, shutdownFrp, stopChatServer } from './chat'
 import { loadSettings } from './store'
 import { titleBarOverlay } from './windowChrome'
 import { setupSmokeCapture } from './smoke'
@@ -148,5 +148,7 @@ if (!gotTheLock) {
 
   app.on('before-quit', () => {
     void stopChatServer()
+    // 别把 frpc 留在后台跑
+    shutdownFrp()
   })
 }

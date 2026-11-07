@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { Fold, Expand } from '@element-plus/icons-vue'
 import appIcon from '../assets/app-icon.svg'
 import type { ToolMeta } from '../tools'
 
@@ -19,7 +18,17 @@ const emit = defineEmits<{
 
 <template>
   <aside class="sidebar" :class="{ collapsed }">
-    <div class="brand">
+    <!-- 点左上角的程序图标即可收起 / 展开侧栏 -->
+    <div
+      class="brand"
+      :class="{ clickable: true }"
+      role="button"
+      tabindex="0"
+      :title="collapsed ? '展开工具列表' : '收起工具列表'"
+      @click="emit('toggle')"
+      @keydown.enter.prevent="emit('toggle')"
+      @keydown.space.prevent="emit('toggle')"
+    >
       <div class="brand-logo">
         <img :src="appIcon" alt="DevToolbox" class="brand-icon" />
       </div>
@@ -29,12 +38,6 @@ const emit = defineEmits<{
           <span class="brand-sub">开发工具箱</span>
         </div>
       </transition>
-      <button class="collapse-btn" :title="collapsed ? '展开侧边栏' : '折叠侧边栏'" @click="emit('toggle')">
-        <el-icon :size="16">
-          <Expand v-if="collapsed" />
-          <Fold v-else />
-        </el-icon>
-      </button>
     </div>
 
     <nav class="nav">
@@ -151,25 +154,19 @@ const emit = defineEmits<{
   white-space: nowrap;
 }
 
-.collapse-btn {
-  margin-left: auto;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--app-text-3);
+/* 点左上角的程序图标收起 / 展开，不再单独放折叠按钮 */
+.brand.clickable {
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  user-select: none;
+  transition: background 0.15s ease;
 }
 
-.collapse-btn:hover {
+.brand.clickable:hover {
   background: var(--app-hover);
-  color: var(--app-text);
+}
+
+.brand.clickable:active .brand-logo {
+  transform: scale(0.92);
 }
 
 .sidebar.collapsed .brand {
@@ -177,11 +174,6 @@ const emit = defineEmits<{
   height: auto;
   padding: 10px 0 8px;
   gap: 6px;
-}
-
-.sidebar.collapsed .collapse-btn {
-  margin-left: 0;
-  background: transparent;
 }
 
 .nav {

@@ -42,7 +42,8 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: Omit<AppSettings, 'downloadDir'> = {
   theme: 'light',
-  sidebarCollapsed: false,
+  // 侧栏默认收起：点左上角图标再展开
+  sidebarCollapsed: true,
   lastToolId: 'json',
   apiAutoSave: false,
   apiContentTypes: [...DEFAULT_CONTENT_TYPES],
@@ -363,8 +364,20 @@ export interface ChatProfile {
   avatar: string
   /** 监听端口 */
   port: number
-  /** 本机局域网 IP，只读，用于告诉好友该连哪个地址 */
+  /** 对外展示的本机 IP：自动探测出来的默认路由地址，或用户手动选的网卡地址 */
   host: string
+}
+
+/** 本机网络情况（多网卡时让用户挑一个能用的地址） */
+export interface ChatNetworkInfo {
+  /** 当前使用的地址 */
+  current: string
+  /** 自动探测到的地址（默认路由出口） */
+  auto: string
+  /** 是否由用户手动指定 */
+  manual: boolean
+  /** 可选的网卡地址，真实网卡在前 */
+  options: { address: string; iface: string; virtual: boolean }[]
 }
 
 export interface ChatFriend {
@@ -378,6 +391,12 @@ export interface ChatFriend {
   status: ChatPeerStatus
   /** 最近一次探测到在线的时间 */
   lastSeenAt: number
+  /** 对方的 X25519 公钥（base64url），拿到后消息正文就是端到端加密的 */
+  pub?: string
+  /** 双方协商出的会话密钥指纹（双方显示一致 = 同一把端到端密钥） */
+  keyPrint?: string
+  /** 对方的 HTTPS 证书指纹（首次连接时记住，之后变化会拒绝） */
+  certPrint?: string
   createdAt: number
   updatedAt: number
 }
@@ -403,6 +422,8 @@ export interface ChatFriendRequest {
   port: number
   /** 备注：我加的备注，或对方申请时填的备注 */
   remark: string
+  /** 对方的 X25519 公钥（base64url） */
+  pub?: string
   status: ChatRequestStatus
   createdAt: number
   respondedAt: number
@@ -444,6 +465,62 @@ export interface ChatState {
   listening: boolean
   /** 监听失败时的原因（端口被占用等） */
   portError: string
+  /** 传输与加密信息（HTTPS + 端到端加密） */
+  security: ChatSecurityInfo
+  /** 跨网络（FRP）状态 */
+  frp: ChatFrpState
+  /** 本机网络情况（多网卡时可切换地址） */
+  network: ChatNetworkInfo
+}
+
+export interface ChatSecurityInfo {
+  /** 是否已经用上 HTTPS */
+  https: boolean
+  /** 本机自签名证书指纹 */
+  fingerprint: string
+  /** 证书主体 */
+  subject: string
+  /** 证书 / 身份文件所在位置 */
+  identityFile: string
+}
+
+/* ------------------------------ FRP 跨网络 ------------------------------ */
+
+export interface ChatFrpConfig {
+  /** 是否启用跨网络 */
+  enabled: boolean
+  /** frps 服务器地址 */
+  serverAddr: string
+  /** frps 服务端口（默认 7000） */
+  serverPort: number
+  /** 认证 token */
+  token: string
+  /** 在服务器上暴露的端口（好友用 服务器地址:该端口 加你） */
+  remotePort: number
+  /** 本机聊天端口（自动跟随聊天端口） */
+  localPort: number
+  /** frpc 可执行文件路径；留空则自动查找 */
+  frpcPath: string
+}
+
+export type ChatFrpStatus = 'stopped' | 'starting' | 'running' | 'error'
+
+export interface ChatFrpState {
+  status: ChatFrpStatus
+  message: string
+  /** 对外地址（服务器地址:远程端口），没配置时为空 */
+  publicAddress: string
+  /** 本机在 frps 上使用的代理名（每台机器不同，避免互相顶掉） */
+  proxyName: string
+  /** 实际使用的 frpc 可执行文件 */
+  binary: string
+  /** frpc 版本 */
+  version: string
+  /** 配置文件路径 */
+  configFile: string
+  /** 最近的日志（最多 200 行） */
+  logs: string[]
+  config: ChatFrpConfig
 }
 
 export interface ChatFriendInput {
@@ -551,7 +628,8 @@ export interface DesktopApi {
     /** 读取聊天状态（首次会生成随机昵称与头像） */
     state(): Promise<ChatState>
     /** 修改自己的资料（昵称 / 头像 / 端口），会广播给在线好友 */
-    updateProfile(patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port'>>): Promise<ChatState>
+    /** 修改自己的资料；host 传空字符串表示回到「自动选择网卡」 */
+    updateProfile(patch: Partial<Pick<ChatProfile, 'nickname' | 'avatar' | 'port' | 'host'>>): Promise<ChatState>
     addFriend(input: ChatFriendInput): Promise<ChatState>
     /** 发送好友申请（对方同意后才会出现在好友列表） */
     sendFriendRequest(input: ChatFriendInput): Promise<ChatState>
@@ -581,6 +659,15 @@ export interface DesktopApi {
     openFile(filePath: string): Promise<void>
     /** 在文件管理器中定位聊天里的文件 */
     revealFile(filePath: string): Promise<void>
+    /* ------------------------------ 跨网络（FRP） ------------------------------ */
+    /** 保存 FRP 配置（运行中会自动重启 frpc） */
+    saveFrp(patch: Partial<ChatFrpConfig>): Promise<ChatState>
+    startFrp(): Promise<ChatState>
+    stopFrp(): Promise<ChatState>
+    /** 让用户选择 frpc 可执行文件 */
+    chooseFrpc(): Promise<{ canceled: boolean; path?: string }>
+    /** 清空本地记录的对方证书指纹（对方重装后需要信任新证书） */
+    trustPeerCert(friendId: string): Promise<ChatState>
     onMessage(cb: (message: ChatMessage) => void): () => void
     onState(cb: (state: ChatState) => void): () => void
   }

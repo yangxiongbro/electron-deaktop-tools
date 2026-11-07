@@ -13,3 +13,6 @@ Thumbs.db
 screenshots/
 .tmp/
 .cache/
+
+# frp 官方二进制按需下载，打包使用的是 resources/frp
+tools/frp/
