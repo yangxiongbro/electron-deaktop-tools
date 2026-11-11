@@ -25,7 +25,7 @@ import { configDir } from './store'
  */
 
 /** 数据结构版本，后续调整结构时可据此做迁移（3：新增文件夹） */
-const STORE_VERSION = 3
+const STORE_VERSION = 4
 
 const MAX_PROJECTS = 50
 const MAX_REQUESTS_PER_PROJECT = 500
@@ -263,21 +263,46 @@ function normalizeFolder(value: unknown, now: number): ApiFolder | null {
   }
 }
 
-/** 老数据没有 order 字段：按创建时间补一个稳定顺序，之后由用户拖拽调整 */
-function assignMissingOrder<T extends { order?: number; createdAt: number }>(items: T[]): void {
-  const sorted = [...items].sort((left, right) => left.createdAt - right.createdAt)
-  let next = 1
+/**
+ * 列表顺序：order 是唯一依据。
+ *
+ * - 新数据 / 老数据都先按创建时间生成一个默认顺序：
+ *   请求「新的在前」（order 小），文件夹「旧的在前」；
+ * - 之后用户拖拽时由 reorderRequests / reorderFolders 把 order 重写成 0..n-1；
+ * - reset = true 用于升级迁移：整体按创建时间重排一次，避免旧的「手动排序」顺序
+ *   和新规则混在一起看不出规律。
+ */
+type OrderDirection = 'newest-first' | 'oldest-first'
+
+function assignMissingOrder<T extends { order?: number; createdAt: number }>(
+  items: T[],
+  direction: OrderDirection,
+  reset = false
+): void {
+  const sorted = [...items].sort((left, right) =>
+    direction === 'newest-first' ? right.createdAt - left.createdAt : left.createdAt - right.createdAt
+  )
+  if (reset) {
+    sorted.forEach((item, index) => {
+      item.order = index
+    })
+    return
+  }
+  let next = sorted.reduce((max, item) => Math.max(max, item.order ?? -1), -1) + 1
   for (const item of sorted) {
     if (item.order === undefined) {
       item.order = next
       next += 1
-    } else {
-      next = Math.max(next, item.order + 1)
     }
   }
 }
 
-function normalizeProject(value: unknown, index: number, now: number): ApiProject | null {
+function normalizeProject(
+  value: unknown,
+  index: number,
+  now: number,
+  resetOrder = false
+): ApiProject | null {
   if (!isObject(value)) return null
 
   const folders = Array.isArray(value.folders)
@@ -304,8 +329,8 @@ function normalizeProject(value: unknown, index: number, now: number): ApiProjec
   for (const record of requests) {
     if (record.folderId && !folderIds.has(record.folderId)) record.folderId = null
   }
-  assignMissingOrder(folders)
-  assignMissingOrder(requests)
+  assignMissingOrder(folders, 'oldest-first', resetOrder)
+  assignMissingOrder(requests, 'newest-first', resetOrder)
 
   return {
     id: str(value.id) || newProjectId(),
@@ -454,8 +479,11 @@ function parseProjectsFile(text: string): ApiProject[] {
     throw new Error('数据文件格式无法识别（缺少 projects 字段）')
   }
 
+  // 4 之前「按创建时间」和「手动排序」是两种模式，升级时统一按创建时间重排一次
+  const resetOrder = num(parsed.version, 1) < STORE_VERSION
+
   const projects = parsed.projects
-    .map((item, index) => normalizeProject(item, index, now))
+    .map((item, index) => normalizeProject(item, index, now, resetOrder))
     .filter((item): item is ApiProject => item !== null)
 
   if (!projects.length) throw new Error('数据文件中没有任何项目')
@@ -628,9 +656,13 @@ export async function saveRequest(
     }
     project.requests[index] = record
   } else {
-    // 新请求排在所属层级的手动顺序末尾
+    // 新请求排在最上面（默认顺序 = 创建时间「新的在前」）
     const siblings = project.requests.filter((item) => (item.folderId ?? null) === (normalized.folderId ?? null))
-    const nextOrder = siblings.reduce((max, item) => Math.max(max, item.order ?? 0), 0) + 1
+    const minOrder = siblings.reduce(
+      (min, item) => Math.min(min, item.order ?? 0),
+      siblings.length ? Number.POSITIVE_INFINITY : 0
+    )
+    const nextOrder = Number.isFinite(minOrder) ? minOrder - 1 : 0
     record = { ...normalized, id: newRequestId(), order: nextOrder, createdAt: now, updatedAt: now }
     project.requests.unshift(record)
     if (project.requests.length > MAX_REQUESTS_PER_PROJECT) {
@@ -757,11 +789,15 @@ export async function moveRequest(
   if (folderId) requireFolder(project, folderId)
   const targetKey = folderId || null
   if ((record.folderId ?? null) !== targetKey) {
-    // 换文件夹后放到目标层级末尾
+    // 换文件夹后放到目标层级最上面（和「新建请求」一致）
     const siblings = project.requests.filter(
       (item) => item.id !== record.id && (item.folderId ?? null) === targetKey
     )
-    record.order = siblings.reduce((max, item) => Math.max(max, item.order ?? 0), 0) + 1
+    const minOrder = siblings.reduce(
+      (min, item) => Math.min(min, item.order ?? 0),
+      siblings.length ? Number.POSITIVE_INFINITY : 0
+    )
+    record.order = Number.isFinite(minOrder) ? minOrder - 1 : 0
   }
   record.folderId = targetKey
   record.updatedAt = Date.now()

@@ -61,8 +61,6 @@ interface RequestForm {
 
 /** 记住上次选中的项目 / 请求，下次打开直接回到现场 */
 const SELECTION_KEY = 'devtoolbox.api.selection.v2'
-/** 请求列表排序方式：按创建时间 / 手动拖拽 */
-const SORT_KEY = 'devtoolbox.api.sortMode'
 /** 旧版本把单个草稿存在 localStorage，这里顺手清理 */
 const LEGACY_STATE_KEY = 'devtoolbox.api.state.v1'
 
@@ -158,7 +156,7 @@ const pendingSaves = ref(0)
 
 const requestTab = ref('params')
 const responseSection = ref('body')
-const bodyView = ref<'pretty' | 'tree'>('pretty')
+const bodyView = ref<'pretty' | 'tree'>('tree')
 const sending = ref(false)
 const progress = ref(0)
 const activeRequestId = ref('')
@@ -173,30 +171,7 @@ const autoSaveEnabled = computed(() => settings.apiAutoSave)
 
 /* ------------------------------ 列表排序 ------------------------------ */
 
-type SortMode = 'created' | 'manual'
-
-function readSortMode(): SortMode {
-  try {
-    return localStorage.getItem(SORT_KEY) === 'manual' ? 'manual' : 'created'
-  } catch {
-    return 'created'
-  }
-}
-
-const sortMode = ref<SortMode>(readSortMode())
-const manualSort = computed(() => sortMode.value === 'manual')
-
-function setSortMode(mode: SortMode): void {
-  if (sortMode.value === mode) return
-  sortMode.value = mode
-  try {
-    localStorage.setItem(SORT_KEY, mode)
-  } catch {
-    // 忽略 localStorage 不可用
-  }
-  ElMessage.success(mode === 'manual' ? '已切换到手动排序，拖动行即可调整顺序' : '已按创建时间排序')
-}
-
+// 排序规则由 order 统一维护（默认来自创建时间），这里只负责把拖拽结果写回主进程
 async function reorderItems(
   kind: 'folder' | 'request',
   parentId: string | null,
@@ -688,7 +663,8 @@ function loadRecord(record: ApiRequestRecord | null): void {
   response.value = null
   sentRequest.value = null
   responseSection.value = 'body'
-  bodyView.value = 'pretty'
+  // 响应体默认用（收起的）树形展示
+  bodyView.value = 'tree'
   // 切回这个请求时，把它上一次的响应和查看状态恢复出来
   if (record) restoreResponse(record.id)
 }
@@ -1181,6 +1157,8 @@ async function send(): Promise<void> {
   response.value = null
   requestTab.value = 'response'
   responseSection.value = 'body'
+  // 每次重新发送都回到「树形、默认收起」的初始视图
+  bodyView.value = 'tree'
   sentRequest.value = { method: state.method, url: state.url, headers: state.headers.map((row) => ({ ...row })) }
 
   const requestConfig = buildHttpRequestConfig(state, requestId, outputPath, MAX_DISPLAY_BYTES)
@@ -1541,7 +1519,6 @@ onUnmounted(() => {
         :dirty-id="dirty ? currentRequestId : ''"
         :data-file="dataFile"
         :collapsed="listCollapsed"
-        :manual-sort="manualSort"
         @select="selectRequest"
         @duplicate="duplicateRequest"
         @remove="deleteRequest"
@@ -1551,7 +1528,6 @@ onUnmounted(() => {
         @remove-folder="removeFolder"
         @move="openMoveDialog"
         @reorder="reorderItems"
-        @sort-mode="setSortMode"
         @reveal="revealDataFile"
         @toggle="toggleRequestList"
       />
@@ -1891,8 +1867,9 @@ onUnmounted(() => {
                       </div>
                       <JsonTree
                         v-else-if="bodyView === 'tree' && canShowTree"
+                        :key="response?.requestId ?? 'empty'"
                         :data="prettyBody.data"
-                        :expand-depth="2"
+                        :expand-depth="1"
                         class="response-tree"
                       />
                       <pre v-else-if="response?.bodyText" class="code-block response-code">{{ prettyBody.text }}</pre>

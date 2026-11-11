@@ -13,7 +13,7 @@ export function setupSmokeCapture(win: BrowserWindow): void {
   const outputDir = process.env.DSH_SMOKE_DIR
   if (!outputDir) return
 
-  const tools = ['json', 'naming', 'codec', 'api', 'markdown', 'cron', 'chat', 'settings']
+  const tools = ['json', 'naming', 'codec', 'api', 'sql', 'text', 'markdown', 'cron', 'chat', 'settings']
 
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 

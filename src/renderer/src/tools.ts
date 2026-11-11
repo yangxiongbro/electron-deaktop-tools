@@ -1,7 +1,9 @@
 import type { Component } from 'vue'
 import {
   ChatDotRound,
+  Coin,
   DataLine,
+  Operation,
   Switch,
   Key,
   Promotion,
@@ -13,6 +15,8 @@ import JsonFormatter from './views/JsonFormatter.vue'
 import NamingConverter from './views/NamingConverter.vue'
 import CodecTool from './views/CodecTool.vue'
 import ApiClient from './views/ApiClient.vue'
+import SqlTool from './views/SqlTool.vue'
+import TextTool from './views/TextTool.vue'
 import MarkdownEditor from './views/MarkdownEditor.vue'
 import CronGenerator from './views/CronGenerator.vue'
 import LocalChat from './views/LocalChat.vue'
@@ -54,6 +58,20 @@ export const TOOLS: ToolMeta[] = [
     description: '按项目管理请求记录，支持鉴权、请求头、form-data 上传与响应保存',
     icon: Promotion,
     component: ApiClient
+  },
+  {
+    id: 'sql',
+    name: 'SQL 工具',
+    description: 'SQL 格式化、压缩、去注释、关键字大小写，以及 MyBatis 参数填充',
+    icon: Coin,
+    component: SqlTool
+  },
+  {
+    id: 'text',
+    name: '字符处理',
+    description: '去空行、去重、排序、大小写、反转行序等常用多行文本处理',
+    icon: Operation,
+    component: TextTool
   },
   {
     id: 'markdown',

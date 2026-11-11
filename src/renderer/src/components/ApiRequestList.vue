@@ -2,7 +2,6 @@
 import { computed, ref } from 'vue'
 import {
   ArrowDown,
-  Check,
   CopyDocument,
   Delete,
   DocumentAdd,
@@ -13,8 +12,7 @@ import {
   FolderOpened,
   MoreFilled,
   Rank,
-  Search,
-  Sort
+  Search
 } from '@element-plus/icons-vue'
 import type { ApiFolder, ApiRequestRecord } from '@shared/types'
 
@@ -50,8 +48,6 @@ const props = defineProps<{
   dataFile: string
   /** 是否折叠为窄条 */
   collapsed?: boolean
-  /** 手动排序模式：可以拖拽调整顺序 */
-  manualSort?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -64,7 +60,6 @@ const emit = defineEmits<{
   (event: 'remove-folder', id: string): void
   (event: 'move', id: string): void
   (event: 'reorder', kind: 'folder' | 'request', parentId: string | null, ids: string[]): void
-  (event: 'sort-mode', mode: 'created' | 'manual'): void
   (event: 'reveal'): void
   (event: 'toggle'): void
 }>()
@@ -133,28 +128,24 @@ function matches(record: ApiRequestRecord): boolean {
 }
 
 /**
- * 排序规则：
- * - 默认按「创建时间」倒序，新建的请求排在最上面；
- * - 手动排序模式下按 order 从小到大，由拖拽维护。
+ * 排序规则：始终按 order 从小到大。
+ * order 的默认值来自创建时间（请求新的在前、文件夹旧的在前），
+ * 用户拖拽后由主进程把 order 重写成 0..n-1，两者就这样结合在一起。
  */
 function sortRequests(list: ApiRequestRecord[]): ApiRequestRecord[] {
   return [...list].sort((left, right) => {
-    if (props.manualSort) {
-      const orderLeft = left.order ?? 0
-      const orderRight = right.order ?? 0
-      if (orderLeft !== orderRight) return orderLeft - orderRight
-    }
+    const orderLeft = left.order ?? 0
+    const orderRight = right.order ?? 0
+    if (orderLeft !== orderRight) return orderLeft - orderRight
     return right.createdAt - left.createdAt
   })
 }
 
 function sortFolders(list: ApiFolder[]): ApiFolder[] {
   return [...list].sort((left, right) => {
-    if (props.manualSort) {
-      const orderLeft = left.order ?? 0
-      const orderRight = right.order ?? 0
-      if (orderLeft !== orderRight) return orderLeft - orderRight
-    }
+    const orderLeft = left.order ?? 0
+    const orderRight = right.order ?? 0
+    if (orderLeft !== orderRight) return orderLeft - orderRight
     return left.createdAt - right.createdAt
   })
 }
@@ -238,7 +229,7 @@ const dragRow = ref<ApiListRow | null>(null)
 const dragOverId = ref('')
 
 /** 手动排序模式、且没有在搜索时才允许拖动 */
-const canDrag = computed(() => Boolean(props.manualSort) && !keyword.value)
+const canDrag = computed(() => !keyword.value)
 
 function rowParent(row: ApiListRow): string | null {
   return row.type === 'folder' ? (row.folder.parentId ?? null) : (row.record.folderId ?? null)
@@ -334,12 +325,7 @@ function onHeaderCommand(command: string | number | object): void {
     case 'new-folder':
       emit('create-folder', null)
       break
-    case 'sort-created':
-      emit('sort-mode', 'created')
-      break
-    case 'sort-manual':
-      emit('sort-mode', 'manual')
-      break
+
     case 'expand':
       expandAll()
       break
@@ -376,18 +362,7 @@ function onHeaderCommand(command: string | number | object): void {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="new-folder" :icon="FolderAdd">新建文件夹</el-dropdown-item>
-            <el-dropdown-item command="sort-created" :icon="Sort" divided>
-              <span class="menu-item">
-                按创建时间排序
-                <el-icon v-if="!manualSort" :size="13"><Check /></el-icon>
-              </span>
-            </el-dropdown-item>
-            <el-dropdown-item command="sort-manual" :icon="Rank">
-              <span class="menu-item">
-                手动排序（可拖拽）
-                <el-icon v-if="manualSort" :size="13"><Check /></el-icon>
-              </span>
-            </el-dropdown-item>
+
             <el-dropdown-item command="expand" :icon="Expand" divided>全部展开</el-dropdown-item>
             <el-dropdown-item command="collapse" :icon="Fold">全部折叠</el-dropdown-item>
             <el-dropdown-item command="reveal" :icon="FolderOpened" divided>打开数据文件位置</el-dropdown-item>
@@ -417,9 +392,7 @@ function onHeaderCommand(command: string | number | object): void {
         <span class="tip">换个关键字试试</span>
       </div>
 
-      <div v-if="manualSort && !query" class="sort-hint small muted">
-        手动排序中：拖动行可调整同一层级内的顺序
-      </div>
+
 
       <div
         v-for="row in rows"
@@ -436,7 +409,7 @@ function onHeaderCommand(command: string | number | object): void {
         :draggable="canDrag"
         role="button"
         tabindex="0"
-        :title="row.type === 'folder' ? row.folder.name : row.record.url || '未填写请求地址'"
+        :title="row.type === 'folder' ? row.folder.name : row.record.name || '未命名请求'"
         @click="onRowClick(row)"
         @keydown.enter.prevent="onRowClick(row)"
         @dragstart="onDragStart(row, $event)"
@@ -728,13 +701,7 @@ function onHeaderCommand(command: string | number | object): void {
   color: var(--app-text-2);
 }
 
-/* 手动排序：拖拽手柄与落点提示 */
-.sort-hint {
-  padding: 2px 8px 6px;
-  font-size: 11px;
-  color: var(--app-text-3);
-}
-
+/* 拖拽排序：手柄与落点提示 */
 .drag-handle {
   flex: none;
   display: inline-flex;
