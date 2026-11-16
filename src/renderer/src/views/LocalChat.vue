@@ -22,10 +22,20 @@ import {
   QuestionFilled,
   Refresh,
   Search,
+  Share,
+  Check,
   Unlock,
   User
 } from '@element-plus/icons-vue'
-import type { ChatFriend, ChatFriendRequest, ChatFrpConfig, ChatMessage, ChatPeerStatus, ChatState } from '@shared/types'
+import type {
+  ChatFriend,
+  ChatFriendRequest,
+  ChatFrpConfig,
+  ChatMessage,
+  ChatPeerStatus,
+  ChatQuote,
+  ChatState
+} from '@shared/types'
 import { formatBytes } from '../utils/format'
 
 const STATUS_TEXT: Record<ChatPeerStatus, string> = {
@@ -823,14 +833,221 @@ const messageText = computed<string>({
 
 const canSend = computed(() => Boolean(currentFriend.value) && messageText.value.trim().length > 0)
 
+/* --------------------------- 引用 / 多选转发 --------------------------- */
+
+const quoted = ref<ChatMessage | null>(null)
+const selectMode = ref(false)
+const selectedIds = ref<string[]>([])
+const forwardVisible = ref(false)
+const forwardMerged = ref(true)
+const forwardTargetId = ref('')
+
+function senderNameOf(message: ChatMessage): string {
+  if (message.direction === 'out') return me.value?.nickname || '我'
+  return currentFriend.value?.remark || currentFriend.value?.nickname || '对方'
+}
+
+/** 引用块里显示的一句话摘要（图片 / 文件用占位） */
+function quotePreview(message: ChatMessage): string {
+  if (message.kind === 'text') return message.text.replace(/\s+/g, ' ').slice(0, 80)
+  if (message.kind === 'image') return '[图片]'
+  return `[文件] ${message.fileName || ''}`.trim()
+}
+
+function startQuote(message: ChatMessage): void {
+  quoted.value = message
+  selectMode.value = false
+  void nextTick(() => {
+    const box = document.querySelector('.composer-input') as HTMLTextAreaElement | null
+    box?.focus()
+  })
+}
+
+function cancelQuote(): void {
+  quoted.value = null
+}
+
+function toQuote(message: ChatMessage): ChatQuote {
+  return {
+    id: message.id,
+    from: senderNameOf(message),
+    kind: message.kind,
+    text: quotePreview(message)
+  }
+}
+
+function toggleSelectMode(): void {
+  selectMode.value = !selectMode.value
+  selectedIds.value = []
+  quoted.value = null
+}
+
+function toggleSelect(id: string): void {
+  const index = selectedIds.value.indexOf(id)
+  if (index >= 0) selectedIds.value.splice(index, 1)
+  else selectedIds.value.push(id)
+}
+
+const selectedMessages = computed(() =>
+  currentMessages.value.filter((message) => selectedIds.value.includes(message.id))
+)
+
+const allSelected = computed(
+  () => currentMessages.value.length > 0 && selectedIds.value.length === currentMessages.value.length
+)
+
+function selectAll(): void {
+  selectedIds.value = allSelected.value ? [] : currentMessages.value.map((message) => message.id)
+}
+
+/** 合并转发的正文：一段「谁 什么时候 说了什么」的记录 */
+function buildTranscript(list: ChatMessage[]): string {
+  return list
+    .map((message) => {
+      const who = senderNameOf(message)
+      const when = clockOf(message.createdAt)
+      const body = message.kind === 'text' ? message.text : quotePreview(message)
+      return `${who} ${when}\n${body}`
+    })
+    .join('\n\n')
+}
+
+function openForward(merged: boolean, message?: ChatMessage): void {
+  if (message) {
+    selectMode.value = true
+    selectedIds.value = [message.id]
+  }
+  if (!selectedMessages.value.length) {
+    ElMessage.warning('请先勾选要转发的消息')
+    return
+  }
+  forwardMerged.value = merged
+  forwardTargetId.value = friends.value.find((item) => item.id !== currentFriendId.value)?.id ?? friends.value[0]?.id ?? ''
+  forwardVisible.value = true
+}
+
+async function doForward(): Promise<void> {
+  const target = friends.value.find((item) => item.id === forwardTargetId.value)
+  const list = selectedMessages.value
+  if (!target || !list.length) return
+  forwardVisible.value = false
+  try {
+    if (forwardMerged.value) {
+      await window.api.chat.send({
+        friendId: target.id,
+        kind: 'text',
+        text: buildTranscript(list),
+        forward: { merged: true, count: list.length }
+      })
+      ElMessage.success(`已合并转发 ${list.length} 条给 ${target.remark || target.nickname || target.ip}`)
+    } else {
+      for (const message of list) {
+        await window.api.chat.send({
+          friendId: target.id,
+          kind: 'text',
+          text: message.kind === 'text' ? message.text : quotePreview(message),
+          forward: { merged: false, count: 1 }
+        })
+      }
+      ElMessage.success(`已逐条转发 ${list.length} 条给 ${target.remark || target.nickname || target.ip}`)
+    }
+    selectMode.value = false
+    selectedIds.value = []
+  } catch (error) {
+    ElMessage.error(`转发失败：${(error as Error).message}`)
+  }
+}
+
+async function onMessageCommand(command: string | number | object, message: ChatMessage): Promise<void> {
+  switch (command) {
+    case 'quote':
+      startQuote(message)
+      break
+    case 'forward':
+      openForward(false, message)
+      break
+    case 'merge':
+      openForward(true, message)
+      break
+    case 'select':
+      selectMode.value = true
+      selectedIds.value = [message.id]
+      break
+    case 'copy': {
+      await copyText(message.kind === 'text' ? message.text : quotePreview(message), '消息内容')
+      break
+    }
+    default:
+      break
+  }
+}
+
+/* --------------------------- 消息右键菜单 --------------------------- */
+
+/** 右键弹出的操作菜单（固定在鼠标位置） */
+const messageMenu = reactive<{ visible: boolean; x: number; y: number; message: ChatMessage | null }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  message: null
+})
+
+const MESSAGE_MENU_WIDTH = 148
+const MESSAGE_MENU_HEIGHT = 190
+
+function openMessageMenu(message: ChatMessage, event: MouseEvent): void {
+  // 防止冒泡到 window 上的「右键即关闭」逻辑
+  event.stopPropagation()
+  // 多选模式下右键不弹菜单，交给勾选处理
+  if (selectMode.value) return
+  messageMenu.message = message
+  messageMenu.x = Math.max(8, Math.min(event.clientX, window.innerWidth - MESSAGE_MENU_WIDTH - 8))
+  messageMenu.y = Math.max(8, Math.min(event.clientY, window.innerHeight - MESSAGE_MENU_HEIGHT - 8))
+  messageMenu.visible = true
+}
+
+function closeMessageMenu(): void {
+  messageMenu.visible = false
+  messageMenu.message = null
+}
+
+function runMessageMenu(command: string): void {
+  const message = messageMenu.message
+  closeMessageMenu()
+  if (message) void onMessageCommand(command, message)
+}
+
+function onGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && messageMenu.visible) closeMessageMenu()
+}
+
+onMounted(() => {
+  // 点空白处 / 按 Esc / 滚动聊天记录都关掉右键菜单
+  window.addEventListener('click', closeMessageMenu)
+  window.addEventListener('contextmenu', closeMessageMenu)
+  window.addEventListener('resize', closeMessageMenu)
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('scroll', closeMessageMenu, true)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeMessageMenu)
+  window.removeEventListener('contextmenu', closeMessageMenu)
+  window.removeEventListener('resize', closeMessageMenu)
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('scroll', closeMessageMenu, true)
+})
+
 async function sendText(): Promise<void> {
   const friend = currentFriend.value
   const text = messageText.value.trim()
   if (!friend || !text || sending.value) return
+  const quote = quoted.value ? toQuote(quoted.value) : undefined
   drafts[friend.id] = ''
+  quoted.value = null
   sending.value = true
   try {
-    await window.api.chat.send({ friendId: friend.id, kind: 'text', text })
+    await window.api.chat.send({ friendId: friend.id, kind: 'text', text, quote })
   } catch (error) {
     ElMessage.error(`发送失败：${(error as Error).message}`)
   } finally {
@@ -1208,7 +1425,18 @@ onUnmounted(() => {
 
             <template v-for="row in messageRows" :key="row.message.id">
               <div v-if="row.showDay" class="day-divider">{{ dayOf(row.message.createdAt) }}</div>
-              <div class="message-row" :class="row.message.direction === 'out' ? 'out' : 'in'">
+              <div
+                class="message-row"
+                :class="[
+                  row.message.direction === 'out' ? 'out' : 'in',
+                  { selecting: selectMode, picked: selectedIds.includes(row.message.id) }
+                ]"
+                @click="selectMode && toggleSelect(row.message.id)"
+                @contextmenu.prevent="openMessageMenu(row.message, $event)"
+              >
+                <span v-if="selectMode" class="msg-check" :class="{ on: selectedIds.includes(row.message.id) }">
+                  <el-icon v-if="selectedIds.includes(row.message.id)" :size="12"><Check /></el-icon>
+                </span>
                 <img
                   v-if="row.message.direction === 'in' && currentFriend.avatar"
                   class="avatar avatar-sm"
@@ -1235,12 +1463,29 @@ onUnmounted(() => {
                       media: row.message.kind !== 'text'
                     }"
                   >
+                    <!-- 引用的原消息 -->
+                    <div v-if="row.message.quote" class="bubble-quote">
+                      <span class="bubble-quote-from">{{ row.message.quote.from }}</span>
+                      <span class="bubble-quote-text">{{ row.message.quote.text || '[消息]' }}</span>
+                    </div>
+
+                    <!-- 转发标记 -->
+                    <div v-if="row.message.forward" class="bubble-forward-tag">
+                      <el-icon :size="12"><Share /></el-icon>
+                      <span>
+                        {{
+                          row.message.forward.merged
+                            ? `聊天记录（${row.message.forward.count} 条）`
+                            : '转发的消息'
+                        }}
+                      </span>
+                    </div>
+
                     <template v-if="row.message.kind === 'text'">
                       <span class="bubble-text">{{ row.message.text }}</span>
                     </template>
 
-                    <template v-else-if="row.message.kind === 'image'">
-                      <div class="image-box">
+                    <template v-else-if="row.message.kind === 'image'">                      <div class="image-box">
                         <img
                           v-if="imageCache[row.message.filePath]"
                           class="chat-image"
@@ -1306,7 +1551,43 @@ onUnmounted(() => {
             </button>
           </el-tooltip>
 
+          <!-- 右键菜单：引用 / 转发 / 多选 / 复制 -->
+          <div
+            v-if="messageMenu.visible"
+            class="msg-menu"
+            :style="{ left: `${messageMenu.x}px`, top: `${messageMenu.y}px` }"
+            @click.stop
+            @contextmenu.prevent
+          >
+            <button class="msg-menu-item" type="button" @click="runMessageMenu('quote')">引用</button>
+            <button class="msg-menu-item" type="button" @click="runMessageMenu('forward')">转发…</button>
+            <button class="msg-menu-item" type="button" @click="runMessageMenu('merge')">合并转发…</button>
+            <button class="msg-menu-item" type="button" @click="runMessageMenu('select')">多选消息</button>
+            <div class="msg-menu-line" />
+            <button class="msg-menu-item" type="button" @click="runMessageMenu('copy')">复制内容</button>
+          </div>
+
+          <!-- 多选：合并转发 / 逐条转发 -->
+          <div v-if="selectMode" class="select-bar">
+            <el-icon :size="14"><Share /></el-icon>
+            <span class="small">已选 {{ selectedIds.length }} 条消息</span>
+            <el-button size="small" text @click="selectAll">{{ allSelected ? '取消全选' : '全选' }}</el-button>
+            <div class="spacer" />
+            <el-button size="small" type="primary" :disabled="!selectedIds.length" @click="openForward(true)">
+              合并转发
+            </el-button>
+            <el-button size="small" :disabled="!selectedIds.length" @click="openForward(false)">逐条转发</el-button>
+            <el-button size="small" text @click="toggleSelectMode">退出多选</el-button>
+          </div>
+
           <div class="composer">
+            <div v-if="quoted" class="quote-bar">
+              <div class="quote-main">
+                <span class="quote-from">{{ senderNameOf(quoted) }}</span>
+                <span class="quote-text">{{ quotePreview(quoted) }}</span>
+              </div>
+              <button class="quote-close" type="button" title="取消引用" @click="cancelQuote">×</button>
+            </div>
             <div class="composer-tools">
               <el-popover v-model:visible="emojiVisible" placement="top-start" :width="292" trigger="click">
                 <template #reference>
@@ -1435,6 +1716,34 @@ onUnmounted(() => {
       </div>
       <template #footer>
         <el-button @click="requestDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 转发目标 -->
+    <el-dialog v-model="forwardVisible" :title="forwardMerged ? '合并转发' : '逐条转发'" width="420px" append-to-body>
+      <div class="forward-form">
+        <div class="small muted">
+          已选 {{ selectedMessages.length }} 条消息，转发给：
+        </div>
+        <el-select v-model="forwardTargetId" placeholder="选择好友" style="width: 100%">
+          <el-option
+            v-for="friend in friends"
+            :key="friend.id"
+            :label="`${friend.remark || friend.nickname || friend.ip}${friend.id === currentFriendId ? '（当前会话）' : ''}`"
+            :value="friend.id"
+          />
+        </el-select>
+        <div class="small muted forward-tip">
+          {{
+            forwardMerged
+              ? '多条消息会合并成一条「聊天记录」发出去'
+              : '每条消息单独发一条，对方按原顺序收到'
+          }}
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="forwardVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!forwardTargetId" @click="doForward">转发</el-button>
       </template>
     </el-dialog>
 
@@ -2775,5 +3084,183 @@ onUnmounted(() => {
 .to-bottom:hover {
   color: var(--app-primary);
   border-color: var(--app-primary);
+}
+/* --------------------------- 引用 / 多选 / 转发 --------------------------- */
+
+.msg-menu {
+  position: fixed;
+  z-index: 20;
+  width: 148px;
+  padding: 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+}
+
+.msg-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.msg-menu-item:hover {
+  background: var(--app-hover);
+}
+
+.msg-menu-line {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--app-border);
+}
+
+.bubble-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-left: 3px solid var(--app-primary);
+  border-radius: 4px;
+  background: rgba(47, 111, 237, 0.08);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--app-text-2);
+}
+
+.bubble-quote-from {
+  font-weight: 600;
+  color: var(--app-primary);
+}
+
+.bubble-quote-text {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.bubble-forward-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(47, 111, 237, 0.1);
+  font-size: 11px;
+  color: var(--app-primary);
+}
+
+.msg-check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 4px;
+  background: var(--app-panel);
+  color: #fff;
+}
+
+.msg-check.on {
+  border-color: var(--app-primary);
+  background: var(--app-primary);
+}
+
+.message-row.selecting {
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.message-row.selecting:hover {
+  background: var(--app-hover);
+}
+
+.message-row.picked {
+  background: rgba(47, 111, 237, 0.08);
+}
+
+.select-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 6px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-panel-muted);
+  margin-bottom: 6px;
+}
+
+.quote-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--app-primary);
+  border-radius: 6px;
+  background: rgba(47, 111, 237, 0.08);
+}
+
+.quote-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.quote-from {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--app-primary);
+}
+
+.quote-text {
+  font-size: 11.5px;
+  color: var(--app-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quote-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text-3);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.quote-close:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.forward-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.forward-tip {
+  font-size: 11.5px;
 }
 </style>

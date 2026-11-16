@@ -59,6 +59,8 @@ export interface OpenFileOptions {
   title?: string
   filters?: FileDialogFilter[]
   defaultPath?: string
+  /** 允许一次选多个文件（结果里的 filePaths 会包含全部） */
+  multiple?: boolean
 }
 
 export interface SaveFileOptions {
@@ -75,6 +77,8 @@ export interface FilePickResult {
   filePath?: string
   fileName?: string
   size?: number
+  /** multiple: true 时返回全部选中文件（第一个同时也在 filePath 里） */
+  filePaths?: string[]
 }
 
 export interface ReadTextResult {
@@ -237,8 +241,10 @@ export interface HttpResponseResult {
   binary?: boolean
   /** 从 Content-Disposition 解析出的建议文件名 */
   suggestedFileName?: string
-  /** 保存模式下的文件路径 */
+  /** 保存模式下的文件路径；响应体过大时这里是自动落盘的临时文件 */
   bodyPath?: string
+  /** 响应体过大：内容没有返回给界面，已保存到临时文件（bodyPath） */
+  tooLarge?: boolean
   finalUrl?: string
   /** 实际发出的请求（方法 / 地址 / 请求头），包含自动补充的通用请求头 */
   requestInfo?: HttpRequestSnapshot
@@ -449,6 +455,29 @@ export interface ChatMessage {  id: string
   createdAt: number
   /** 发送失败时的错误信息 */
   error?: string
+  /** 引用回复：被引用消息的摘要 */
+  quote?: ChatQuote
+  /** 转发标记：合并转发 / 单条转发 */
+  forward?: ChatForward
+}
+
+/** 被引用的消息摘要（随消息一起发出去，对方也能看到引用） */
+export interface ChatQuote {
+  id: string
+  /** 原消息发送者昵称 */
+  from: string
+  /** 原消息类型，用来显示 [图片] / [文件] 之类的占位 */
+  kind: ChatMessageKind
+  /** 原消息文字（超长会在界面里截断） */
+  text: string
+}
+
+/** 转发标记 */
+export interface ChatForward {
+  /** true = 合并转发（多条合并成一条聊天记录） */
+  merged: boolean
+  /** 合并转发的消息条数 */
+  count: number
 }
 
 export interface ChatState {
@@ -536,6 +565,10 @@ export interface ChatSendInput {
   fileName?: string
   /** 图片 / 文件的 base64（不含 data URL 前缀） */
   base64?: string
+  /** 引用回复：把被引用消息的摘要一起发出去 */
+  quote?: ChatQuote
+  /** 转发标记：合并转发 / 单条转发 */
+  forward?: ChatForward
 }
 
 /* ------------------------------------------------------------------ */

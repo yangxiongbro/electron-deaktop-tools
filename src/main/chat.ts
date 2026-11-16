@@ -7,6 +7,7 @@ import type { TLSSocket } from 'node:tls'
 import { createConnection } from 'node:net'
 import { basename, dirname, extname, join } from 'node:path'
 import type {
+  ChatForward,
   ChatFriend,
   ChatFriendInput,
   ChatFriendRequest,
@@ -16,6 +17,7 @@ import type {
   ChatNetworkInfo,
   ChatPeerStatus,
   ChatProfile,
+  ChatQuote,
   ChatRequestStatus,
   ChatSecurityInfo,
   ChatState
@@ -283,6 +285,21 @@ function normalizeRequest(value: unknown, now: number): ChatFriendRequest | null
   }
 }
 
+function normalizeQuote(value: unknown): ChatQuote | undefined {
+  if (!isObject(value)) return undefined
+  const id = str(value.id)
+  const text = str(value.text).slice(0, MAX_TEXT_LENGTH)
+  if (!id && !text) return undefined
+  const kind = value.kind === 'image' || value.kind === 'file' ? value.kind : 'text'
+  return { id, from: str(value.from).slice(0, 40), kind, text }
+}
+
+function normalizeForward(value: unknown): ChatForward | undefined {
+  if (!isObject(value)) return undefined
+  const count = Math.max(1, Math.round(num(value.count, 1)))
+  return { merged: value.merged === true, count }
+}
+
 function normalizeMessage(value: unknown, now: number): ChatMessage | null {
   if (!isObject(value)) return null
   const kind = value.kind === 'image' || value.kind === 'file' ? value.kind : 'text'
@@ -299,7 +316,9 @@ function normalizeMessage(value: unknown, now: number): ChatMessage | null {
     filePath: str(value.filePath),
     dataUrl: '',
     createdAt: num(value.createdAt, now),
-    error: str(value.error) || undefined
+    error: str(value.error) || undefined,
+    quote: normalizeQuote(value.quote),
+    forward: normalizeForward(value.forward)
   }
 }
 
@@ -1575,7 +1594,9 @@ async function receiveMessage(from: PeerBrief, remoteIp: string, payload: Record
     fileSize,
     filePath,
     dataUrl: '',
-    createdAt: now
+    createdAt: now,
+    quote: normalizeQuote(payload.quote),
+    forward: normalizeForward(payload.forward)
   }
 
   appendMessage(store, message)
@@ -1616,6 +1637,8 @@ export interface SendTextInput {
   friendId: string
   kind: ChatMessageKind
   text: string
+  quote?: ChatQuote
+  forward?: ChatForward
 }
 
 export async function sendText(input: SendTextInput): Promise<ChatMessage> {
@@ -1626,6 +1649,8 @@ export async function sendText(input: SendTextInput): Promise<ChatMessage> {
   const text = str(input.text).slice(0, MAX_TEXT_LENGTH)
   if (!text.trim()) throw new Error('消息内容不能为空')
 
+  const quote = normalizeQuote(input.quote)
+  const forward = normalizeForward(input.forward)
   const message: ChatMessage = {
     id: `m-${randomSuffix()}`,
     friendId: friend.id,
@@ -1636,7 +1661,9 @@ export async function sendText(input: SendTextInput): Promise<ChatMessage> {
     fileSize: 0,
     filePath: '',
     dataUrl: '',
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    quote,
+    forward
   }
   appendMessage(store, message)
   await persist()
@@ -1645,7 +1672,9 @@ export async function sendText(input: SendTextInput): Promise<ChatMessage> {
   const error = await deliverToFriend(friend, {
     id: message.id,
     kind: message.kind,
-    text: message.text
+    text: message.text,
+    quote,
+    forward
   })
   if (error) {
     message.error = error

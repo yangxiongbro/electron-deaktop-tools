@@ -686,35 +686,44 @@ function insertSyntax(snippet: string): void {
 }
 
 async function openFile(): Promise<void> {
-  if (dirty.value) {
-    try {
-      await ElMessageBox.confirm('当前文档有未保存的修改，打开其它文件会丢失这些修改，是否继续？', '未保存的修改', {
-        type: 'warning',
-        confirmButtonText: '继续打开',
-        cancelButtonText: '取消'
-      })
-    } catch {
-      return
-    }
-  }
   const pick = await window.api.dialog.openFile({
     title: '打开 Markdown 文件',
     filters: [
       { name: 'Markdown 文件', extensions: ['md', 'markdown', 'txt'] },
       { name: '所有文件', extensions: ['*'] }
-    ]
+    ],
+    multiple: true
   })
-  if (pick.canceled || !pick.filePath) return
-  const read = await window.api.file.readText(pick.filePath)
-  if (!read.ok) {
-    ElMessage.error(read.error ?? '读取失败')
-    return
+  const picked = pick.filePaths?.length ? pick.filePaths : pick.filePath ? [pick.filePath] : []
+  if (pick.canceled || !picked.length) return
+
+  let openedCount = 0
+  for (const filePath of picked) {
+    // 已经打开过的文件直接切到对应标签页
+    const existing = docs.value.find((item) => item.path === filePath)
+    if (existing) {
+      await activateDoc(existing.id)
+      continue
+    }
+    const read = await window.api.file.readText(filePath)
+    if (!read.ok) {
+      ElMessage.error(`${filePath}：${read.error ?? '读取失败'}`)
+      continue
+    }
+    captureActiveDoc()
+    const doc = createDoc({ path: filePath, content: read.content ?? '' })
+    activeDocId.value = ''
+    await activateDoc(doc.id)
+    await refreshFileStat()
+    captureActiveDoc()
+    openedCount += 1
   }
-  content.value = read.content ?? ''
-  currentPath.value = pick.filePath
-  await refreshFileStat()
-  savedContent.value = content.value
-  ElMessage.success(`已打开 ${pick.fileName ?? ''}`)
+
+  if (openedCount > 0) {
+    ElMessage.success(openedCount > 1 ? `已打开 ${openedCount} 个文件` : `已打开 ${fileName.value}`)
+  } else {
+    ElMessage.info('这些文件已经在标签页里打开了')
+  }
 }
 
 async function saveFile(forceNewPath = false): Promise<void> {
@@ -748,15 +757,14 @@ async function saveFile(forceNewPath = false): Promise<void> {
   currentPath.value = target
   savedContent.value = content.value
   await refreshFileStat()
+  // 把保存结果同步到标签页（另存为会换掉标题、清掉未保存标记）
+  captureActiveDoc()
   ElMessage.success('已保存')
 }
 
 function clearDocument(): void {
   content.value = ''
-  currentPath.value = ''
-  savedContent.value = ''
-  fileMtime.value = 0
-  fileSize.value = 0
+  captureActiveDoc()
 }
 
 /**
@@ -818,6 +826,130 @@ function handleTab(event: KeyboardEvent): void {
   replaceRange(start, end, '  ', start + 2, start + 2)
 }
 
+/* ---------------------------- 多文档（标签页） ---------------------------- */
+
+interface MdDoc {
+  id: string
+  /** 文件完整路径，空字符串表示还没保存过 */
+  path: string
+  content: string
+  savedContent: string
+  mtime: number
+  size: number
+  editorScroll: number
+  previewScroll: number
+}
+
+let docSeq = 0
+const docs = ref<MdDoc[]>([])
+const activeDocId = ref('')
+
+function newDocId(): string {
+  docSeq += 1
+  return `md-doc-${docSeq}`
+}
+
+function docTitle(doc: MdDoc): string {
+  if (!doc.path) return '未命名.md'
+  return doc.path.split(/[\\/]/).pop() || doc.path
+}
+
+/** 标签页上的「未保存」小圆点 */
+function docDirty(doc: MdDoc): boolean {
+  if (doc.id === activeDocId.value) return content.value !== savedContent.value
+  return doc.content !== doc.savedContent
+}
+
+const activeDoc = computed(() => docs.value.find((item) => item.id === activeDocId.value) ?? null)
+
+/** 把当前编辑区状态写回 docs 中对应的那条记录 */
+function captureActiveDoc(): void {
+  const doc = activeDoc.value
+  if (!doc) return
+  doc.path = currentPath.value
+  doc.content = content.value
+  doc.savedContent = savedContent.value
+  doc.mtime = fileMtime.value
+  doc.size = fileSize.value
+  doc.editorScroll = editorRef.value?.scrollTop ?? doc.editorScroll
+  doc.previewScroll = previewRef.value?.scrollTop ?? doc.previewScroll
+}
+
+function createDoc(init: { path?: string; content?: string } = {}): MdDoc {
+  const text = init.content ?? ''
+  const doc: MdDoc = {
+    id: newDocId(),
+    path: init.path ?? '',
+    content: text,
+    savedContent: text,
+    mtime: 0,
+    size: 0,
+    editorScroll: 0,
+    previewScroll: 0
+  }
+  docs.value.push(doc)
+  return doc
+}
+
+async function activateDoc(id: string): Promise<void> {
+  if (id === activeDocId.value) return
+  const doc = docs.value.find((item) => item.id === id)
+  if (!doc) return
+  captureActiveDoc()
+  activeDocId.value = ''
+  currentPath.value = doc.path
+  content.value = doc.content
+  savedContent.value = doc.savedContent
+  fileMtime.value = doc.mtime
+  fileSize.value = doc.size
+  activeDocId.value = id
+  closeSearch()
+  await nextTick()
+  if (editorRef.value) editorRef.value.scrollTop = doc.editorScroll
+  if (previewRef.value) previewRef.value.scrollTop = doc.previewScroll
+}
+
+function newDocument(): void {
+  captureActiveDoc()
+  const doc = createDoc()
+  void activateDoc(doc.id)
+}
+
+async function closeDoc(id: string): Promise<void> {
+  const index = docs.value.findIndex((item) => item.id === id)
+  if (index < 0) return
+  const doc = docs.value[index]
+  const isActive = id === activeDocId.value
+  if (isActive) captureActiveDoc()
+  if (doc.content !== doc.savedContent) {
+    try {
+      await ElMessageBox.confirm(
+        `「${docTitle(doc)}」还有未保存的修改，关闭后这些修改会丢失。`,
+        '关闭文档',
+        {
+          type: 'warning',
+          confirmButtonText: '不保存，直接关闭',
+          cancelButtonText: '取消'
+        }
+      )
+    } catch {
+      return
+    }
+  }
+  docs.value.splice(index, 1)
+  if (!docs.value.length) {
+    activeDocId.value = ''
+    const fresh = createDoc()
+    await activateDoc(fresh.id)
+    return
+  }
+  if (isActive) {
+    const fallback = docs.value[Math.min(index, docs.value.length - 1)]
+    activeDocId.value = ''
+    await activateDoc(fallback.id)
+  }
+}
+
 /* ---------------------------- 视图切换定位 ---------------------------- */
 
 /** 从预览切回编辑区时，把编辑区滚到预览所在的位置 */
@@ -846,6 +978,14 @@ watch(viewMode, (next, prev) => {
 /* ------------------------------ 生命周期 ------------------------------ */
 
 onMounted(() => {
+  // 首次进入给一个空白文档，之后的文档都在标签页里
+  if (!docs.value.length) {
+    const first = createDoc({ content: DEFAULT_CONTENT })
+    activeDocId.value = first.id
+    currentPath.value = ''
+    content.value = first.content
+    savedContent.value = first.savedContent
+  }
   fileWatchTimer = window.setInterval(() => {
     void checkExternalChange()
   }, 2000)
@@ -998,6 +1138,25 @@ onUnmounted(() => {
       <button type="button" class="search-btn" title="上一个（Shift + Enter）" @click="prevMatch">↑</button>
       <button type="button" class="search-btn" title="下一个（Enter）" @click="nextMatch">↓</button>
       <button type="button" class="search-btn" title="关闭" @click="closeSearch">×</button>
+    </div>
+
+    <!-- 多文档标签页 -->
+    <div class="doc-tabs">
+      <button
+        v-for="doc in docs"
+        :key="doc.id"
+        type="button"
+        class="doc-tab"
+        :class="{ active: doc.id === activeDocId }"
+        :title="doc.path || '未命名文档（尚未保存到文件）'"
+        @click="activateDoc(doc.id)"
+      >
+        <el-icon :size="12"><Document /></el-icon>
+        <span class="doc-tab-name">{{ docTitle(doc) }}</span>
+        <span v-if="docDirty(doc)" class="doc-tab-dot" title="有未保存的修改" />
+        <span class="doc-tab-close" title="关闭" @click.stop="closeDoc(doc.id)">×</span>
+      </button>
+      <button type="button" class="doc-tab-add" title="新建文档" @click="newDocument">＋</button>
     </div>
 
     <div class="md-body">
@@ -1251,6 +1410,101 @@ onUnmounted(() => {
 .fmt-btn {
   min-width: 30px;
   padding: 0 6px;
+}
+
+/* ---------------------------- 多文档标签页 ---------------------------- */
+
+.doc-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 4px 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.doc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--app-border);
+  border-bottom-color: transparent;
+  border-radius: 8px 8px 0 0;
+  background: var(--app-panel-muted);
+  color: var(--app-text-2);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.doc-tab:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.doc-tab.active {
+  background: var(--app-panel);
+  border-color: var(--app-border);
+  border-bottom-color: var(--app-panel);
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.doc-tab-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doc-tab-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--app-primary);
+}
+
+.doc-tab-close {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--app-text-3);
+}
+
+.doc-tab-close:hover {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+.doc-tab-add {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-3);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.doc-tab-add:hover {
+  color: var(--app-primary);
+  border-color: var(--app-primary);
 }
 
 .md-body {

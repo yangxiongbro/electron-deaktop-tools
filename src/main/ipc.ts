@@ -126,11 +126,13 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('dialog:open-file', async (event, options: OpenFileOptions = {}): Promise<FilePickResult> => {
     const win = BrowserWindow.fromWebContents(event.sender)
+    const properties: Array<'openFile' | 'multiSelections'> = ['openFile']
+    if (options.multiple) properties.push('multiSelections')
     const args = {
       title: options.title ?? '选择文件',
       defaultPath: options.defaultPath || loadSettings().downloadDir,
       filters: options.filters && options.filters.length ? options.filters : undefined,
-      properties: ['openFile' as const]
+      properties
     }
     const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
     if (result.canceled || result.filePaths.length === 0) return { canceled: true }
@@ -139,7 +141,8 @@ export function registerIpcHandlers(): void {
       canceled: false,
       filePath,
       fileName: filePath.split(/[\\/]/).pop() ?? filePath,
-      size: await statQuiet(filePath)
+      size: await statQuiet(filePath),
+      filePaths: result.filePaths
     }
   })
 

@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, promises as fsp } from 'node:fs'
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http'
 import { request as httpsRequest, type RequestOptions } from 'node:https'
-import { dirname, extname, basename } from 'node:path'
+import { dirname, extname, basename, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { once } from 'node:events'
 import type {
@@ -11,6 +11,7 @@ import type {
   HttpResponseResult,
   KeyValueRow
 } from '@shared/types'
+import { configDir } from './store'
 
 const MAX_REDIRECTS = 5
 
@@ -245,7 +246,29 @@ interface ResponseCapture {
   bodyBase64?: string
   binary?: boolean
   bodyPath?: string
+  /** 响应体太大，没有进内存展示，而是落到了临时文件 */
+  tooLarge?: boolean
   size: number
+}
+
+/**
+ * 超长响应落盘时的临时目录。
+ * 用应用自己的数据目录（不是系统 TEMP），确保一定可写，也方便用户找到。
+ */
+function responseTempDir(): string {
+  return join(configDir(), 'response-temp')
+}
+
+function responseTempFile(contentType: string): string {
+  const ext = /json/i.test(contentType)
+    ? '.json'
+    : /xml|html/i.test(contentType)
+      ? '.html'
+      : /csv/i.test(contentType)
+        ? '.csv'
+        : '.txt'
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  return join(responseTempDir(), `response-${stamp}-${Math.random().toString(36).slice(2, 8)}${ext}`)
 }
 
 async function captureResponse(
@@ -262,12 +285,42 @@ async function captureResponse(
     const limit = Math.max(1024, config.options.maxDisplayBytes || 5 * 1024 * 1024)
     const chunks: Buffer[] = []
     let size = 0
+    /** 超过展示上限后改成边收边写临时文件，避免把超长内容塞进渲染进程 */
+    let overflowPath = ''
+    let overflowStream: ReturnType<typeof createWriteStream> | null = null
+
     for await (const chunk of res) {
       const buf = chunk as Buffer
       size += buf.length
-      if (size <= limit) chunks.push(buf)
+      if (!overflowStream) {
+        if (size <= limit) {
+          chunks.push(buf)
+        } else {
+          overflowPath = responseTempFile(rawContentType ?? '')
+          await fsp.mkdir(dirname(overflowPath), { recursive: true }).catch(() => undefined)
+          overflowStream = createWriteStream(overflowPath)
+          for (const buffered of chunks) overflowStream.write(buffered)
+          overflowStream.write(buf)
+          chunks.length = 0
+        }
+      } else if (!overflowStream.write(buf)) {
+        await once(overflowStream, 'drain')
+      }
       onProgress(size, total)
     }
+
+    // 超长响应：整体落到临时文件，界面只提示路径，不再渲染内容
+    if (overflowStream && overflowPath) {
+      overflowStream.end()
+      await once(overflowStream, 'close')
+      return {
+        bodyPath: overflowPath,
+        binary: !isTextualContentType(rawContentType),
+        tooLarge: true,
+        size
+      }
+    }
+
     const collected = Buffer.concat(chunks, Math.min(size, limit))
     const truncated = size > limit
 
@@ -467,6 +520,7 @@ export async function performHttpRequest(
           ? safeFileName(parseDispositionFileName(disposition) ?? '', suggestedFileNameFor(contentType))
           : undefined,
         bodyPath: captured.bodyPath,
+        tooLarge: captured.tooLarge,
         finalUrl: url.toString(),
         requestInfo: { ...requestInfo, headers: [...requestInfo.headers] }
       }

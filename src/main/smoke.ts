@@ -84,10 +84,55 @@ export function setupSmokeCapture(win: BrowserWindow): void {
         await runScript(`window.__toolbox && window.__toolbox.setCollapsed(false)`)
         await wait(600)
 
+        /** 让文档截图落在更有代表性的界面上（对称加密页 / 多标签页） */
+        const prepareTool = async (tool: string): Promise<void> => {
+          if (tool === 'codec') {
+            await runScript(`(() => {
+              const tabs = Array.from(document.querySelectorAll('.segmented-item'))
+              const target = tabs.find((el) => el.textContent.trim() === '对称加密')
+              if (target) target.click()
+              return Boolean(target)
+            })()`)
+            await wait(500)
+            await runScript(`(() => {
+              const example = Array.from(document.querySelectorAll('button')).find(
+                (el) => (el.textContent || '').trim() === '示例'
+              )
+              if (example) example.click()
+              return Boolean(example)
+            })()`)
+            await wait(600)
+            return
+          }
+          if (tool === 'markdown') {
+            await runScript(`(async () => {
+              const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+              const area = document.querySelector('.md-textarea')
+              if (!area) return false
+              area.value = ['# 项目说明', '', '这是一个支持多标签页的 Markdown 编辑器示例。', '', '## 特性', '', '- 同时打开、编辑多个文件', '- 每行缩进原样保留', '- 文档内搜索与预览目录'].join(String.fromCharCode(10))
+              area.dispatchEvent(new Event('input', { bubbles: true }))
+              await sleep(300)
+              const add = document.querySelector('.doc-tab-add')
+              if (add) add.click()
+              await sleep(400)
+              const next = document.querySelector('.md-textarea')
+              next.value = ['# 第二个文档', '', '标签页之间互不影响，内容各自保留。'].join(String.fromCharCode(10))
+              next.dispatchEvent(new Event('input', { bubbles: true }))
+              await sleep(400)
+              const tabs = Array.from(document.querySelectorAll('.doc-tab'))
+              if (tabs[0]) tabs[0].click()
+              await sleep(400)
+              return true
+            })()`)
+            await wait(600)
+          }
+        }
+
         for (const tool of tools) {
           await runScript(`window.__toolbox && window.__toolbox.setTool(${JSON.stringify(tool)})`)
           await wait(700)
           if (tool === 'api') await seedApiRequest()
+          await prepareTool(tool)
           await capture(`${tool}.png`)
         }
 

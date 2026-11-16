@@ -15,7 +15,8 @@ import {
   Refresh,
   Setting,
   Upload,
-  VideoPause
+  VideoPause,
+  View
 } from '@element-plus/icons-vue'
 import { DEFAULT_CONTENT_TYPES } from '@shared/types'
 import type {
@@ -64,7 +65,11 @@ const SELECTION_KEY = 'devtoolbox.api.selection.v2'
 /** 旧版本把单个草稿存在 localStorage，这里顺手清理 */
 const LEGACY_STATE_KEY = 'devtoolbox.api.state.v1'
 
-const MAX_DISPLAY_BYTES = 5 * 1024 * 1024
+/**
+ * 响应内容超过这个大小就不再渲染（树形解析 + DOM 渲染都会卡死界面），
+ * 主进程会直接把响应体写进临时文件，界面只提示路径。
+ */
+const MAX_DISPLAY_BYTES = 1024 * 1024
 const TREE_LIMIT = 1024 * 1024
 /** 停止输入后多久自动保存到数据文件（仅在开启自动保存时生效） */
 const AUTOSAVE_DELAY = 600
@@ -1284,6 +1289,37 @@ function openSavedFile(): void {
   if (target) void window.api.app.showItemInFolder(target)
 }
 
+/** 直接用系统默认程序打开落盘的响应（超长响应走这里） */
+async function openTempFile(): Promise<void> {
+  const target = response.value?.bodyPath
+  if (!target) return
+  const error = await window.api.app.openPath(target)
+  if (error) ElMessage.error(error)
+}
+
+/** 把临时文件另存到用户指定位置 */
+async function saveTempFileAs(): Promise<void> {
+  const current = response.value
+  if (!current?.bodyPath) return
+  const read = await window.api.file.readText(current.bodyPath)
+  if (!read.ok) {
+    ElMessage.error(read.error ?? '读取临时文件失败')
+    return
+  }
+  const pick = await window.api.dialog.saveFile({
+    title: '另存响应内容',
+    defaultFileName: suggestFileName()
+  })
+  if (pick.canceled || !pick.filePath) return
+  const write = await window.api.file.writeText(pick.filePath, read.content ?? '')
+  if (write.ok) {
+    ElMessage.success('已保存')
+    await window.api.app.showItemInFolder(pick.filePath)
+  } else {
+    ElMessage.error(write.error ?? '保存失败')
+  }
+}
+
 /* --------------------------- Content-Type 管理 --------------------------- */
 
 async function rememberContentType(value?: string): Promise<void> {
@@ -1847,8 +1883,28 @@ onUnmounted(() => {
                         <el-alert type="error" :closable="false" show-icon :title="response.error" />
                       </div>
                       <div v-else-if="response?.bodyPath" class="padded">
-                        <el-alert type="success" :closable="false" show-icon title="响应已保存到文件">
-                          <div class="mono small">{{ response.bodyPath }}</div>
+                        <el-alert
+                          :type="response.tooLarge ? 'warning' : 'success'"
+                          :closable="false"
+                          show-icon
+                          :title="
+                            response.tooLarge
+                              ? `响应内容过大（${formatBytes(response.size)}），未在界面展示，已保存到临时文件`
+                              : '响应已保存到文件'
+                          "
+                        >
+                          <div class="mono small saved-path">{{ response.bodyPath }}</div>
+                          <div class="saved-actions">
+                            <el-button size="small" type="primary" :icon="View" @click="openTempFile">
+                              打开文件
+                            </el-button>
+                            <el-button size="small" :icon="FolderOpened" @click="openSavedFile">打开所在目录</el-button>
+                            <el-button size="small" :icon="Download" @click="saveTempFileAs">另存为…</el-button>
+                          </div>
+                          <div v-if="response.tooLarge" class="small muted saved-tip">
+                            超过 {{ formatBytes(MAX_DISPLAY_BYTES) }} 的响应不再渲染，避免界面卡死；文件在系统临时目录下，
+                            需要长期保留请「另存为」。
+                          </div>
                         </el-alert>
                       </div>
                       <div v-else-if="isBinaryResponse" class="binary-box">
@@ -2514,5 +2570,22 @@ onUnmounted(() => {
 
 .ct-tip {
   margin-top: 10px;
+}
+.saved-path {
+  margin: 4px 0 8px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.saved-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.saved-tip {
+  margin-top: 6px;
+  line-height: 1.6;
 }
 </style>
