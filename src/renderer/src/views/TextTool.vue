@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, Delete, Operation } from '@element-plus/icons-vue'
 import { copyText } from '../utils/clipboard'
+import FileTransformButton from '../components/FileTransformButton.vue'
 import {
   DEFAULT_TEXT_OPTIONS,
   processText,
@@ -44,6 +45,11 @@ const outputStats = computed(() => textStats(output.value))
 
 function run(): void {
   output.value = input.value ? processText(input.value, options.value) : ''
+}
+
+/** 给「处理文件」用：用当前勾选的规则处理任意文本 */
+function processFileText(text: string): string {
+  return processText(text, options.value)
 }
 
 watch(
@@ -89,9 +95,9 @@ function loadExample(): void {
       <el-button :icon="Delete" @click="clearAll">清空</el-button>
       <el-button text @click="resetOptions">重置选项</el-button>
       <el-checkbox v-model="autoRun" size="small">输入时自动处理</el-checkbox>
-
-      <div class="spacer" />
       <el-button text type="primary" @click="loadExample">示例</el-button>
+      <div class="spacer" />
+      <FileTransformButton :process="processFileText" suffix="-handled" />
     </div>
 
     <div class="page-body">

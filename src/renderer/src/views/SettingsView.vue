@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Moon, Sunny } from '@element-plus/icons-vue'
-import type { AppInfo, ChatState, ThemeMode } from '@shared/types'
+import type { AppInfo, ChatState, SyncState, ThemeMode } from '@shared/types'
 import {
   setApiAutoSave,
   setDownloadDir,
@@ -15,6 +15,8 @@ const { settings } = useSettings()
 const info = ref<AppInfo | null>(null)
 const chatState = ref<ChatState | null>(null)
 const chatPort = ref('')
+const syncState = ref<SyncState | null>(null)
+const syncMaxMb = ref(100)
 
 async function chooseDir(): Promise<void> {
   const result = await window.api.settings.chooseDownloadDir()
@@ -48,6 +50,7 @@ function toggleApiAutoSave(value: boolean): void {
 }
 
 onMounted(async () => {
+  void loadSyncState()
   try {
     info.value = await window.api.app.info()
   } catch {
@@ -82,6 +85,43 @@ async function saveChatPort(): Promise<void> {
     else ElMessage.success(`聊天端口已改为 ${port}`)
   } catch (error) {
     ElMessage.error(`修改端口失败：${(error as Error).message}`)
+  }
+}
+
+async function saveSyncMaxSize(): Promise<void> {
+  const mb = Number(syncMaxMb.value)
+  if (!Number.isInteger(mb) || mb < 1 || mb > 4096) {
+    ElMessage.warning('单个文件上限需要在 1 ~ 4096 MB 之间')
+    return
+  }
+  try {
+    syncState.value = await window.api.sync.save({ maxFileMb: mb })
+    ElMessage.success(`单个文件上限已设为 ${mb} MB`)
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function chooseSyncDir(): Promise<void> {
+  const pick = await window.api.sync.chooseDir()
+  if (pick.canceled) return
+  syncState.value = await window.api.sync.state()
+  ElMessage.success('同步文件夹已更新')
+}
+
+async function openSyncDir(): Promise<void> {
+  const dir = syncState.value?.syncDir
+  if (!dir) return
+  await window.api.app.openPath(dir)
+}
+
+async function loadSyncState(): Promise<void> {
+  try {
+    const next = await window.api.sync.state()
+    syncState.value = next
+    syncMaxMb.value = next.settings.maxFileMb ?? 100
+  } catch {
+    // 读不到就用默认值
   }
 }
 
@@ -208,6 +248,37 @@ async function openChatDir(): Promise<void> {
         <div class="small muted chat-status">
           <template v-if="chatState?.listening">正在监听端口 {{ chatState?.me.port }}，本机地址 {{ chatState?.me.host }}</template>
           <template v-else>{{ chatState?.portError || '尚未启动聊天服务' }}</template>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">文件同步</div>
+        <div class="card-desc muted small">
+          电脑与手机同步时按大小过滤：超过上限的文件不会被同步，也不会出现在清单里。所有类型的文件都会同步。
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="row-title">单个文件上限</div>
+            <div class="row-desc muted small">默认 100 MB，可设 1 ~ 4096 MB（WiFi 与蓝牙共用）。</div>
+          </div>
+          <div class="port-row">
+            <el-input v-model.number="syncMaxMb" style="width: 120px" placeholder="100" @keydown.enter="saveSyncMaxSize">
+              <template #append>
+                <span class="small muted">MB</span>
+              </template>
+            </el-input>
+            <el-button @click="saveSyncMaxSize">保存</el-button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="row-title">同步文件夹</div>
+            <div class="row-desc muted small">{{ syncState?.syncDir || '-' }}</div>
+          </div>
+          <div class="dir-row">
+            <el-button :icon="FolderOpened" @click="chooseSyncDir">选择目录</el-button>
+            <el-button :icon="FolderOpened" @click="openSyncDir">打开</el-button>
+          </div>
         </div>
       </section>
 

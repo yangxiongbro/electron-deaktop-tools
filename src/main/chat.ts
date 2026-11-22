@@ -30,6 +30,7 @@ import {
   openPayload,
   sealPayload,
   sessionKeyPrint,
+  shortFingerprint,
   tlsOptions
 } from './chatCrypto'
 import {
@@ -609,6 +610,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     payload = opened
   }
 
+  // 证书变更后还没确认信任的好友：直接拒收消息（等用户在好友菜单里信任新证书）
+  const blocked = matchFriend(store, from, remoteIp)?.certMismatch === true
+
   switch (str(body.action)) {
     case 'ping':
       sendJson(res, 200, { ok: true, app: APP_MARKER, profile: peerBrief(store.me) })
@@ -618,6 +622,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 200, { ok: true })
       return
     case 'deliver': {
+      if (blocked) {
+        sendJson(res, 409, { ok: false, error: 'cert mismatch，对方已更换证书，等待确认信任' })
+        return
+      }
       if (!isObject(payload)) {
         sendJson(res, 400, { ok: false, error: 'bad payload' })
         return
@@ -727,10 +735,13 @@ function postJson(
   ip: string,
   port: number,
   body: unknown,
-  timeoutMs = 8000
+  timeoutMs = 8000,
+  expectedCertPrint?: string
 ): Promise<{ status: number; json: Record<string, unknown> | null; certPrint: string }> {
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(JSON.stringify(body), 'utf8')
+    let certPrint = ''
+    let sent = false
     const req = httpsRequest(
       {
         host: ip,
@@ -748,8 +759,6 @@ function postJson(
       },
       (res) => {
         const chunks: Buffer[] = []
-        const peer = (res.socket as TLSSocket).getPeerCertificate()
-        const certPrint = normalizeFingerprint(peer?.fingerprint256)
         res.on('data', (chunk: Buffer) => chunks.push(chunk))
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8')
@@ -762,9 +771,41 @@ function postJson(
         })
       }
     )
+
+    /**
+     * 关键：证书校验放在 TLS 握手完成之后、写请求体之前。
+     * 之前是先发后校验，导致「证书变了」时消息其实已经送到对方了。
+     */
+    const verifyThenSend = (socket: TLSSocket): void => {
+      if (sent) return
+      // 握手还没完成时拿不到证书，等 secureConnect 再校验一次
+      const peer = socket.getPeerCertificate?.()
+      const print = normalizeFingerprint(peer?.fingerprint256)
+      if (!print) return
+      certPrint = print
+      if (expectedCertPrint && normalizeFingerprint(expectedCertPrint) !== print) {
+        const error = new Error('对方 HTTPS 证书与上次不一致') as Error & { code: string; certPrint: string }
+        error.code = 'CERT_MISMATCH'
+        error.certPrint = print
+        // 直接 reject：req.destroy(err) 在部分平台会被包装成 socket hang up
+        sent = true
+        req.destroy()
+        reject(error)
+        return
+      }
+      sent = true
+      req.end(payload)
+    }
+
+    req.on('socket', (socket) => {
+      const tls = socket as TLSSocket
+      tls.once('secureConnect', () => verifyThenSend(tls))
+      // 连接复用 / 已握手完成的情况立即校验
+      verifyThenSend(tls)
+    })
+
     req.on('timeout', () => req.destroy(new Error('timeout')))
     req.on('error', reject)
-    req.end(payload)
   })
 }
 
@@ -1615,21 +1656,28 @@ async function deliverToFriend(friend: ChatFriend, payload: Record<string, unkno
     : { action: 'deliver', from, payload }
 
   try {
-    const res = await postJson(friend.ip, friend.port, body, 12000)
-    if (res.certPrint) {
-      if (!friend.certPrint) {
-        // 首次连接：记住对方证书指纹
-        friend.certPrint = res.certPrint
-        await persist()
-        broadcastState()
-      } else if (normalizeFingerprint(friend.certPrint) !== res.certPrint) {
-        return '对方的 HTTPS 证书与上次不一致，已拒绝发送（可在好友菜单里信任新证书）'
-      }
+    // 把已记住的证书指纹带进去：对不上就在 TLS 握手后、真正发出内容之前中断
+    const res = await postJson(friend.ip, friend.port, body, 12000, friend.certPrint)
+    if (res.certPrint && !friend.certPrint) {
+      // 首次连接：记住对方证书指纹
+      friend.certPrint = res.certPrint
+      await persist()
+      broadcastState()
     }
     if (res.status >= 400) return `对方返回 ${res.status}`
     return ''
   } catch (error) {
-    return (error as Error).message
+    const err = error as Error & { code?: string; certPrint?: string }
+    if (err.code === 'CERT_MISMATCH') {
+      // 对方换了证书：立刻标记为「待确认」，在用户点「信任对方新证书」之前不再收发消息
+      friend.certMismatch = true
+      if (err.certPrint) friend.pendingCertPrint = err.certPrint
+      friend.updatedAt = Date.now()
+      await persist()
+      broadcastState()
+      return `对方的 HTTPS 证书与上次不一致（${shortFingerprint(err.certPrint ?? '')}），已拒绝发送；确认是对方换了证书后可在好友菜单里「信任对方新证书」`
+    }
+    return err.message || '发送失败'
   }
 }
 

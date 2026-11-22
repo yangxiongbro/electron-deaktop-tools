@@ -13,7 +13,15 @@ export function setupSmokeCapture(win: BrowserWindow): void {
   const outputDir = process.env.DSH_SMOKE_DIR
   if (!outputDir) return
 
-  const tools = ['json', 'naming', 'codec', 'api', 'sql', 'text', 'markdown', 'cron', 'chat', 'settings']
+  // 文本工具箱里的 5 个工具合并成一页，这里按「工具 + 标签页」分别截图
+  const tools = (process.env.DSH_SMOKE_ONLY ?? 'text-workbench,sql,cron,api,markdown,sync,chat,settings').split(',').filter(Boolean)
+  const workbenchTabs: { tab: string; file: string; label: string }[] = [
+    { tab: 'json', file: 'json.png', label: 'JSON 格式化' },
+    { tab: 'naming', file: 'naming.png', label: '命名规范转换' },
+    { tab: 'codec', file: 'codec.png', label: '编码 / 解码' },
+    { tab: 'text', file: 'text.png', label: '字符处理' },
+    { tab: 'sql', file: 'sql.png', label: 'SQL 工具' }
+  ]
 
   const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -86,6 +94,19 @@ export function setupSmokeCapture(win: BrowserWindow): void {
 
         /** 让文档截图落在更有代表性的界面上（对称加密页 / 多标签页） */
         const prepareTool = async (tool: string): Promise<void> => {
+          if (tool === 'sync') {
+            // 页面挂载后主动点一次「刷新串口」，再等 PowerShell 枚举完成
+            await wait(1500)
+            await runScript(`(() => {
+              const btn = Array.from(document.querySelectorAll('button')).find(
+                (el) => (el.textContent || '').trim() === '刷新串口'
+              )
+              if (btn) btn.click()
+              return Boolean(btn)
+            })()`)
+            await wait(8000)
+            return
+          }
           if (tool === 'codec') {
             await runScript(`(() => {
               const tabs = Array.from(document.querySelectorAll('.segmented-item'))
@@ -128,12 +149,102 @@ export function setupSmokeCapture(win: BrowserWindow): void {
           }
         }
 
+        /** 切到文本工具箱的某个标签页 */
+        const selectWorkbenchTab = async (label: string): Promise<void> => {
+          await runScript(`(() => {
+            const tabs = Array.from(document.querySelectorAll('.segmented-item'))
+            const target = tabs.find((el) => el.textContent.trim() === ${JSON.stringify(label)})
+            if (target) target.click()
+            return Boolean(target)
+          })()`)
+          await wait(500)
+        }
+
+        /** JSON 标签页：填一段示例并格式化 */
+        const fillJsonExample = async (): Promise<void> => {
+          await runScript(`(() => {
+            const area = document.querySelector('.json-textarea, .fill-textarea textarea, textarea')
+            if (!area) return false
+            area.value = JSON.stringify(
+              {
+                name: 'DevToolbox',
+                version: '1.4.0',
+                tools: ['JSON 格式化', '命名转换', '编码解码', '字符处理', 'SQL 工具'],
+                openSource: true,
+                author: { nick: '安静的松鼠', tags: ['electron', 'vue'] }
+              },
+              null,
+              2
+            )
+            area.dispatchEvent(new Event('input', { bubbles: true }))
+            return true
+          })()`)
+          await wait(400)
+          await runScript(`(() => {
+            const button = Array.from(document.querySelectorAll('button')).find(
+              (el) => (el.textContent || '').replace(/\s+/g, '') === '格式化'
+            )
+            if (button) button.click()
+            return Boolean(button)
+          })()`)
+          await wait(600)
+        }
+
+        /** 点一下工具栏里的「示例」，让截图里有内容 */
+        const clickExample = async (): Promise<void> => {
+          await runScript(`(() => {
+            const example = Array.from(document.querySelectorAll('button')).find(
+              (el) => (el.textContent || '').trim() === '示例'
+            )
+            if (example) example.click()
+            return Boolean(example)
+          })()`)
+          await wait(500)
+        }
+
         for (const tool of tools) {
           await runScript(`window.__toolbox && window.__toolbox.setTool(${JSON.stringify(tool)})`)
-          await wait(700)
+          await wait(800)
           if (tool === 'api') await seedApiRequest()
+          if (tool === 'text-workbench') {
+            for (const item of workbenchTabs) {
+              await selectWorkbenchTab(item.label)
+              if (item.tab === 'json') await fillJsonExample()
+              else await clickExample()
+              if (item.tab === 'codec') {
+                await runScript(`(() => {
+                  const tabs = Array.from(document.querySelectorAll('.segmented-item'))
+                  const target = tabs.find((el) => el.textContent.trim() === '对称加密')
+                  if (target) target.click()
+                  return Boolean(target)
+                })()`)
+                await wait(400)
+                await clickExample()
+              }
+              await capture(item.file)
+            }
+            continue
+          }
           await prepareTool(tool)
           await capture(`${tool}.png`)
+          if (tool === 'sync') {
+            // 连接方式切到蓝牙，再补一张
+            await runScript(`(() => {
+              const labels = Array.from(document.querySelectorAll('.el-radio-button__inner'))
+              const target = labels.find((el) => (el.textContent || '').trim() === '蓝牙')
+              if (target) target.click()
+              return Boolean(target)
+            })()`)
+            await wait(2500)
+            await capture('sync-bt.png')
+            await runScript(`(() => {
+              const labels = Array.from(document.querySelectorAll('.el-radio-button__inner'))
+              const target = labels.find((el) => (el.textContent || '').trim() === 'WiFi / 局域网')
+              if (target) target.click()
+              return Boolean(target)
+            })()`)
+            await wait(500)
+          }
         }
 
         // 语法弹窗：Markdown 与 Cron 各截一张

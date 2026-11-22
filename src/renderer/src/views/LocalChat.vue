@@ -195,7 +195,11 @@ const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\uFE0F|\u2
 
 function isEmojiOnly(text: string): boolean {
   const trimmed = text.trim()
-  return trimmed.length > 0 && trimmed.length <= 16 && EMOJI_ONLY.test(trimmed)
+  if (!trimmed || trimmed.length > 16) return false
+  // 数字 / # / * 也属于「Emoji 组件」（1️⃣ 这种），但纯数字消息必须当普通文本走气泡，
+  // 所以要求至少有一个真正的图形表情或变体选择符
+  if (!/[\p{Extended_Pictographic}\uFE0F]/u.test(trimmed)) return false
+  return EMOJI_ONLY.test(trimmed)
 }
 
 function statusClass(status: ChatPeerStatus): string {
@@ -711,7 +715,7 @@ async function trustCert(friend: ChatFriend): Promise<void> {
   }
   try {
     applyState(await window.api.chat.trustPeerCert(friend.id))
-    ElMessage.success('已清除旧的证书记录，下次连接会记住新证书')
+    ElMessage.success('已信任新证书，可以继续收发消息了')
   } catch (error) {
     ElMessage.error((error as Error).message)
   }
@@ -1413,6 +1417,21 @@ onUnmounted(() => {
               </template>
             </el-dropdown>
           </header>
+
+          <!-- 对方证书换了：在确认信任之前不再收发消息 -->
+          <div v-if="currentFriend.certMismatch" class="cert-warning">
+            <el-icon :size="15"><Lock /></el-icon>
+            <div class="cert-warning-main">
+              <div class="cert-warning-title">对方的 HTTPS 证书与上次不一致，已暂停收发消息</div>
+              <div class="small muted">
+                可能是对方重装程序或换了设备。确认是对方本人后点右侧按钮信任新证书
+                <span v-if="currentFriend.pendingCertPrint" class="mono">
+                  （新指纹 {{ currentFriend.pendingCertPrint.slice(0, 16) }}…）
+                </span>
+              </div>
+            </div>
+            <el-button size="small" type="warning" @click="trustCert(currentFriend)">信任新证书</el-button>
+          </div>
 
           <div ref="messageListRef" class="message-list" @scroll.passive="onMessageScroll">
             <div v-if="historyQuery" class="filter-hint small muted">
@@ -3262,5 +3281,25 @@ onUnmounted(() => {
 
 .forward-tip {
   font-size: 11.5px;
+}
+.cert-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(217, 119, 6, 0.35);
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+}
+
+.cert-warning-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cert-warning-title {
+  font-size: 12.5px;
+  font-weight: 600;
 }
 </style>

@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, Delete, Refresh, Switch } from '@element-plus/icons-vue'
 import { NAMING_MODES, convertNaming } from '../utils/naming'
+import FileTransformButton from '../components/FileTransformButton.vue'
 import { copyText } from '../utils/clipboard'
 
 const mode = ref(NAMING_MODES[0].id)
@@ -14,12 +15,16 @@ const currentMode = computed(() => NAMING_MODES.find((item) => item.id === mode.
 
 const inputLines = computed(() => input.value.split('\n').filter((line) => line.trim() !== '').length)
 
-function convert(): void {
+function convertText(text: string): string {
   const style = currentMode.value.style
-  const lines = input.value.split('\n')
-  output.value = lines
+  return text
+    .split('\n')
     .map((line) => (line.trim() === '' ? '' : convertNaming(line, style)))
     .join('\n')
+}
+
+function convert(): void {
+  output.value = convertText(input.value)
 }
 
 function swap(): void {
@@ -75,9 +80,9 @@ watch(mode, () => convert(), { immediate: true })
       <el-button :icon="CopyDocument" :disabled="!output" @click="copyOutput">复制结果</el-button>
       <el-button :icon="Delete" @click="clearAll">清空</el-button>
       <el-checkbox v-model="autoConvert" size="small">输入时自动转换</el-checkbox>
-
-      <div class="spacer" />
       <el-button text type="primary" @click="loadExample">示例</el-button>
+      <div class="spacer" />
+      <FileTransformButton :process="convertText" suffix="-converted" />
     </div>
 
     <div class="mode-hint">

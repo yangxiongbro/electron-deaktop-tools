@@ -23,9 +23,21 @@ import type {
   OpenFileOptions,
   SaveFileOptions,
   WriteTextResult,
-  ReadTextResult
+  ReadTextResult,
+  SyncSettings
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
+import { listSerialPorts, receiveOverBluetooth, sendOverBluetooth } from './btSerial'
+import { btStatus, startBtSync, stopBtSync } from './btService'
+import {
+  chooseSyncDir,
+  clearSyncEvents,
+  removeSyncDevice,
+  saveSyncSettings,
+  startSync,
+  stopSync,
+  syncState
+} from './sync'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
 import {
   createFolder,
@@ -475,6 +487,50 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('chat:trust-cert', (_event, friendId: string) => trustPeerCert(friendId))
 
+  /* ---------------------------- 文件同步 ---------------------------- */
+
+  ipcMain.handle('sync:state', () => syncState())
+
+  ipcMain.handle('sync:save', (_event, patch: Partial<SyncSettings>) => saveSyncSettings(patch))
+
+  ipcMain.handle('sync:start', () => startSync())
+
+  ipcMain.handle('sync:stop', () => stopSync())
+
+  ipcMain.handle('sync:remove-device', (_event, deviceId: string) => removeSyncDevice(deviceId))
+
+  ipcMain.handle('sync:clear-events', () => clearSyncEvents())
+
+  ipcMain.handle('sync:serial-ports', () => listSerialPorts())
+
+  ipcMain.handle('sync:bt-status', () => btStatus())
+
+  ipcMain.handle('sync:bt-start', async (_event, portName: string) => startBtSync(portName))
+
+  ipcMain.handle('sync:bt-stop', () => stopBtSync())
+
+  ipcMain.handle('sync:bt-receive', async (_event, portName: string) => {
+    const state = await syncState()
+    return receiveOverBluetooth(portName, state.syncDir)
+  })
+
+  ipcMain.handle('sync:bt-send', async (_event, portName: string, filePath: string) =>
+    sendOverBluetooth(portName, filePath)
+  )
+
+  ipcMain.handle('sync:choose-dir', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const state = await syncState()
+    const args = {
+      title: '选择同步文件夹',
+      defaultPath: state.syncDir,
+      properties: ['openDirectory' as const, 'createDirectory' as const]
+    }
+    const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
+    if (result.canceled || result.filePaths.length === 0) return { canceled: true }
+    await chooseSyncDir(result.filePaths[0])
+    return { canceled: false, dirPath: result.filePaths[0] }
+  })
   ipcMain.handle('chat:choose-dir', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const current = (await chatState()).chatDir

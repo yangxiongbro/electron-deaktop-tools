@@ -153,7 +153,7 @@ async function importFile(): Promise<void> {
   ElMessage.success(`已导入 ${result.fileName ?? ''}`)
 }
 
-/* ------------------------------ 超大文件处理 ------------------------------ */
+/* -------------------------------- 文件处理 -------------------------------- */
 
 const fileDialog = ref(false)
 const inputFile = ref<FilePickResult | null>(null)
@@ -285,7 +285,7 @@ watch(indent, reformat)
       <div class="spacer" />
 
       <el-button :icon="Upload" @click="importFile">导入文件</el-button>
-      <el-button :icon="Download" @click="fileDialog = true">超大文件处理</el-button>
+      <el-button :icon="Download" @click="fileDialog = true">文件处理</el-button>
     </div>
 
     <el-alert v-if="error" type="error" :closable="false" show-icon class="json-error">
@@ -334,7 +334,7 @@ watch(indent, reformat)
             <template v-else>
               <pre class="code-block">{{ renderedText }}</pre>
               <div v-if="textTruncated" class="truncate-hint small">
-                内容较大，仅显示前 30 万字符；完整内容可点击「复制」或在「超大文件处理」中直接输出到文件
+                内容较大，仅显示前 30 万字符；完整内容可点击「复制」或在「文件处理」中直接输出到文件
               </div>
             </template>
           </template>
@@ -346,7 +346,7 @@ watch(indent, reformat)
       </section>
     </div>
 
-    <el-dialog v-model="fileDialog" title="超大文件处理" width="680px" :close-on-click-modal="false">
+    <el-dialog v-model="fileDialog" title="文件处理" width="680px" :close-on-click-modal="false">
       <div class="file-form">
         <el-alert
           type="info"

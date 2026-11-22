@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import AppSidebar from './components/AppSidebar.vue'
-import { TOOLS, TOOL_SETTINGS_ID } from './tools'
+import { TOOLS, TOOL_SETTINGS_ID, resolveToolId } from './tools'
 import { setLastTool, setSidebarCollapsed, setTheme, useSettings } from './stores/settings'
 const { settings } = useSettings()
 
@@ -31,8 +31,17 @@ function toggleSidebar(): void {
 }
 
 onMounted(() => {
-  if (TOOLS.some((tool) => tool.id === settings.lastToolId)) {
-    currentId.value = settings.lastToolId
+  // 旧版本的 json / naming / codec / text / sql 入口已合并到文本工具箱，这里做一次迁移
+  const resolved = resolveToolId(settings.lastToolId)
+  if (resolved.tab) {
+    try {
+      localStorage.setItem('devtoolbox.workbench.tab', resolved.tab)
+    } catch {
+      // 忽略 localStorage 不可用
+    }
+  }
+  if (TOOLS.some((tool) => tool.id === resolved.toolId)) {
+    currentId.value = resolved.toolId
   }
 
   window.__toolbox = {

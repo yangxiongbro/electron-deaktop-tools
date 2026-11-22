@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpcHandlers } from './ipc'
 import { bootstrapChat, shutdownFrp, stopChatServer } from './chat'
+import { bootstrapSync, shutdownSync, syncState } from './sync'
+import { shutdownBtSync, startBtSync } from './btService'
 import { loadSettings } from './store'
 import { titleBarOverlay } from './windowChrome'
 import { setupSmokeCapture } from './smoke'
@@ -10,8 +12,8 @@ import { setupSmokeCapture } from './smoke'
 const APP_ID = 'com.electron.deaktoptools'
 
 /** 默认窗口大小（也会按屏幕可用区域自动收窄，避免小屏幕上超出边界） */
-const DEFAULT_WINDOW_SIZE = { width: 1440, height: 900 }
-const MIN_WINDOW_SIZE = { width: 1040, height: 660 }
+const DEFAULT_WINDOW_SIZE = { width: 1440, height: 1000 }
+const MIN_WINDOW_SIZE = { width: 1040, height: 720 }
 
 let mainWindow: BrowserWindow | null = null
 
@@ -30,7 +32,8 @@ if (process.env.DSH_SMOKE_DIR) {
 
 function createWindow(): BrowserWindow {
   const settings = loadSettings()
-  const smoke = Boolean(process.env.DSH_SMOKE_DIR)
+  // DSH_SMOKE_NO_CAPTURE=1 时只借用临时用户数据目录，不跑自动截图（调试 / 单页截图用）
+  const smoke = Boolean(process.env.DSH_SMOKE_DIR) && !process.env.DSH_SMOKE_NO_CAPTURE
   const iconPath = join(__dirname, '../../build/icon.png')
 
   // 以默认尺寸打开，但不超过当前屏幕可用区域（小屏笔记本 / 高缩放比时自动收窄）
@@ -135,6 +138,20 @@ if (!gotTheLock) {
       console.error('[chat] 启动失败', error)
     })
 
+    // 文件同步：上次是「已开启」的话，开机就把同步服务拉起来
+    void bootstrapSync()
+      .then(() => syncState())
+      .then((state) => {
+        // 上次开着蓝牙同步就自动恢复
+        if (state.settings.btEnabled && state.settings.btPort) {
+          return startBtSync(state.settings.btPort, { keep: true })
+        }
+        return undefined
+      })
+      .catch((error: unknown) => {
+      console.error('[sync] 启动失败', error)
+    })
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createWindow()
@@ -150,5 +167,7 @@ if (!gotTheLock) {
     void stopChatServer()
     // 别把 frpc 留在后台跑
     shutdownFrp()
+    shutdownBtSync()
+    void shutdownSync()
   })
 }

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, Delete, Key, Refresh } from '@element-plus/icons-vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
+import FileTransformButton from '../components/FileTransformButton.vue'
 import { copyText } from '../utils/clipboard'
 import {
   base64Decode,
@@ -147,51 +148,47 @@ const description = computed(() => {
   return `对文本进行 ${names[category.value] ?? ''} ${verb}`
 })
 
+/** 把一段文本按当前「工具 + 方向」处理（结果面板与「处理文件」共用） */
+function processText(source: string): string {
+  switch (category.value) {
+    case 'url':
+      return effectiveDirection.value === 'encode' ? urlEncode(source) : urlDecode(source)
+    case 'base64':
+      return effectiveDirection.value === 'encode' ? base64Encode(source) : base64Decode(source)
+    case 'hash':
+      return algo.value === 'md5' ? md5(source) : algo.value === 'sha1' ? sha1(source) : sha256(source)
+    case 'html':
+      return effectiveDirection.value === 'encode' ? htmlEncode(source) : htmlDecode(source)
+    case 'unicode':
+      return effectiveDirection.value === 'encode' ? unicodeEncode(source) : unicodeDecode(source)
+    case 'hex':
+      return effectiveDirection.value === 'encode' ? hexEncode(source) : hexDecode(source)
+    case 'jwt':
+      return describeJwt(source)
+    case 'symmetric':
+      return effectiveDirection.value === 'encode'
+        ? encryptSymmetric(source, symOptions.value)
+        : decryptSymmetric(source, symOptions.value)
+    default:
+      return source
+  }
+}
+
+function describeJwt(source: string): string {
+  const decoded = decodeJwt(source)
+  const status = decoded.expired === null ? '未包含过期时间（exp）' : decoded.expired ? '已过期' : '在有效期内'
+  return (
+    `# Header\n${decoded.header}\n\n# Payload\n${decoded.payload}\n\n` +
+    `# 签名\n${decoded.signature}\n\n# 状态\n${status}` +
+    (decoded.expiresAt ? `\n过期时间：${new Date(decoded.expiresAt * 1000).toLocaleString()}` : '')
+  )
+}
+
 const result = computed<{ text: string; error: string }>(() => {
   const source = input.value
   if (!source) return { text: '', error: '' }
   try {
-    switch (category.value) {
-      case 'url':
-        return { text: effectiveDirection.value === 'encode' ? urlEncode(source) : urlDecode(source), error: '' }
-      case 'base64':
-        return { text: effectiveDirection.value === 'encode' ? base64Encode(source) : base64Decode(source), error: '' }
-      case 'hash':
-        return {
-          text: algo.value === 'md5' ? md5(source) : algo.value === 'sha1' ? sha1(source) : sha256(source),
-          error: ''
-        }
-      case 'html':
-        return { text: effectiveDirection.value === 'encode' ? htmlEncode(source) : htmlDecode(source), error: '' }
-      case 'unicode':
-        return {
-          text: effectiveDirection.value === 'encode' ? unicodeEncode(source) : unicodeDecode(source),
-          error: ''
-        }
-      case 'hex':
-        return { text: effectiveDirection.value === 'encode' ? hexEncode(source) : hexDecode(source), error: '' }
-      case 'jwt': {
-        const decoded = decodeJwt(source)
-        const status =
-          decoded.expired === null ? '未包含过期时间（exp）' : decoded.expired ? '已过期' : '在有效期内'
-        return {
-          text:
-            `# Header\n${decoded.header}\n\n# Payload\n${decoded.payload}\n\n` +
-            `# 签名\n${decoded.signature}\n\n# 状态\n${status}` +
-            (decoded.expiresAt ? `\n过期时间：${new Date(decoded.expiresAt * 1000).toLocaleString()}` : ''),
-          error: ''
-        }
-      }
-      case 'symmetric': {
-        const text =
-          effectiveDirection.value === 'encode'
-            ? encryptSymmetric(source, symOptions.value)
-            : decryptSymmetric(source, symOptions.value)
-        return { text, error: '' }
-      }
-      default:
-        return { text: '', error: '' }
-    }
+    return { text: processText(source), error: '' }
   } catch (error) {
     return { text: '', error: (error as Error).message }
   }
@@ -255,8 +252,9 @@ function loadExample(): void {
       <el-button :icon="CopyDocument" :disabled="!result.text" @click="copyOutput">复制结果</el-button>
       <el-button :icon="Refresh" :disabled="!reversible || !result.text" @click="swap">结果作为输入</el-button>
       <el-button :icon="Delete" @click="clearAll">清空</el-button>
-      <div class="spacer" />
       <el-button text type="primary" @click="loadExample">示例</el-button>
+      <div class="spacer" />
+      <FileTransformButton :process="processText" suffix="-codec" :disabled="category === 'jwt'" />
     </div>
 
     <div class="hint-bar">

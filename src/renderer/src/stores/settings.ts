@@ -6,7 +6,7 @@ const state = reactive<AppSettings>({
   downloadDir: '',
   // 与主进程的 DEFAULT_SETTINGS 保持一致：侧栏默认收起
   sidebarCollapsed: true,
-  lastToolId: 'json',
+  lastToolId: 'text-workbench',
   apiAutoSave: false,
   apiContentTypes: [...DEFAULT_CONTENT_TYPES],
   apiSidebarCollapsed: false

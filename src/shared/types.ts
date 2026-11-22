@@ -44,7 +44,7 @@ export const DEFAULT_SETTINGS: Omit<AppSettings, 'downloadDir'> = {
   theme: 'light',
   // 侧栏默认收起：点左上角图标再展开
   sidebarCollapsed: true,
-  lastToolId: 'json',
+  lastToolId: 'text-workbench',
   apiAutoSave: false,
   apiContentTypes: [...DEFAULT_CONTENT_TYPES],
   apiSidebarCollapsed: false
@@ -403,6 +403,10 @@ export interface ChatFriend {
   keyPrint?: string
   /** 对方的 HTTPS 证书指纹（首次连接时记住，之后变化会拒绝） */
   certPrint?: string
+  /** 对方证书变了但还没确认信任：此时不再收发消息 */
+  certMismatch?: boolean
+  /** 检测到的新证书指纹（用户点「信任对方新证书」后启用） */
+  pendingCertPrint?: string
   createdAt: number
   updatedAt: number
 }
@@ -478,6 +482,115 @@ export interface ChatForward {
   merged: boolean
   /** 合并转发的消息条数 */
   count: number
+}
+
+/* ------------------------------------------------------------------ */
+/* 文件同步（桌面端做服务端，安卓端做客户端）                            */
+/* ------------------------------------------------------------------ */
+
+export interface SyncSettings {
+  /** 是否开启同步服务 */
+  enabled: boolean
+  /** 服务端口 */
+  port: number
+  /** 同步文件夹（空字符串表示使用默认目录） */
+  syncDir: string
+  /** 手机上传的文件是否自动接收 */
+  autoPush: boolean
+  /** 单个文件大小上限（MB），超过的不同步；默认 100 */
+  maxFileMb?: number
+  /** 蓝牙自动同步是否开启 */
+  btEnabled?: boolean
+  /** 蓝牙自动同步用的串口 */
+  btPort?: string
+}
+
+export interface SyncAddress {
+  address: string
+  label: string
+  virtual: boolean
+}
+
+export interface SyncDevice {
+  id: string
+  name: string
+  /** Android / iOS / Windows… */
+  platform: string
+  ip: string
+  /** 手机端监听的端口（用于回推文件） */
+  port: number
+  lastSeenAt: number
+  lastSyncAt: number
+  /** 累计同步过的文件数 */
+  filesSynced: number
+}
+
+/** 正在传输的文件（用于显示进度百分比） */
+export interface SyncTransfer {
+  path: string
+  sent: number
+  total: number
+  /** true = 电脑发出（下发），false = 电脑接收（上传） */
+  outgoing: boolean
+}
+
+export interface SyncEvent {
+  at: number
+  /** in = 手机传上来，out = 桌面推下去 */
+  direction: 'in' | 'out'
+  path: string
+  device: string
+  size: number
+}
+
+export interface SerialPortInfo {
+  /** 真正要打开的串口（可能是通用的「传入端口」） */
+  path: string
+  name: string
+  /** 配对的蓝牙设备名（拿不到时为空） */
+  device: string
+  /** 设备 MAC，用来把端口和设备对上 */
+  mac?: string
+  bluetooth: boolean
+  /** 实际使用的串口（与 path 相同，方便界面展示） */
+  attachedPort?: string
+  /** 是不是借用了通用「传入端口」 */
+  viaIncoming?: boolean
+}
+
+export interface BtSyncStatus {
+  running: boolean
+  /** 当前正在传输的文件（没有则为 null） */
+  transfer?: SyncTransfer | null
+  port: string
+  device: string
+  lastLog: string
+  received: number
+  sent: number
+  since: number
+}
+
+export interface BtTransferResult {
+  ok: boolean
+  message: string
+  filePath?: string
+  size?: number
+}
+
+export interface SyncState {
+  running: boolean
+  port: number
+  syncDir: string
+  settings: SyncSettings
+  devices: SyncDevice[]
+  events: SyncEvent[]
+  /** 本机可用于手机填写的地址 */
+  addresses: SyncAddress[]
+  /** 同步目录当前清单的版本号 */
+  version: string
+  fileCount: number
+  /** WiFi 同步当前正在传输的文件（没有则为 null） */
+  transfer?: SyncTransfer | null
 }
 
 export interface ChatState {
@@ -656,6 +769,28 @@ export interface DesktopApi {
     importFile(): Promise<ApiImportResult>
     /** 在文件管理器中定位数据文件 */
     reveal(): Promise<void>
+  }
+  sync: {
+    /** 读取同步状态（服务是否运行、设备、最近同步记录） */
+    state(): Promise<SyncState>
+    /** 保存设置（开启 / 关闭、端口、同步目录） */
+    save(patch: Partial<SyncSettings>): Promise<SyncState>
+    start(): Promise<SyncState>
+    stop(): Promise<SyncState>
+    /** 选择同步文件夹 */
+    chooseDir(): Promise<{ canceled: boolean; dirPath?: string }>
+    removeDevice(deviceId: string): Promise<SyncState>
+    clearEvents(): Promise<SyncState>
+    /** 列出本机串口（蓝牙串口排在前面），用于蓝牙同步 */
+    serialPorts(): Promise<SerialPortInfo[]>
+    /** 等手机通过蓝牙发一个文件过来 */
+    btReceive(portName: string): Promise<BtTransferResult>
+    /** 通过蓝牙把本机文件发给手机 */
+    btSend(portName: string, filePath: string): Promise<BtTransferResult>
+    /** 蓝牙自动同步：开启（等价 WiFi 的「开启同步」） */
+    btStart(portName: string): Promise<BtSyncStatus>
+    btStop(): Promise<BtSyncStatus>
+    btStatus(): Promise<BtSyncStatus>
   }
   chat: {
     /** 读取聊天状态（首次会生成随机昵称与头像） */

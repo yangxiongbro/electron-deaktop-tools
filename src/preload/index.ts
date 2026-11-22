@@ -23,7 +23,12 @@ import type {
   JsonFileRequest,
   JsonFileResult,
   OpenFileOptions,
-  SaveFileOptions
+  SaveFileOptions,
+  BtSyncStatus,
+  BtTransferResult,
+  SerialPortInfo,
+  SyncSettings,
+  SyncState
 } from '@shared/types'
 
 const api: DesktopApi = {
@@ -96,6 +101,22 @@ const api: DesktopApi = {
     exportAll: () => ipcRenderer.invoke('projects:export') as Promise<ApiExportResult>,
     importFile: () => ipcRenderer.invoke('projects:import') as Promise<ApiImportResult>,
     reveal: () => ipcRenderer.invoke('projects:reveal') as Promise<void>
+  },
+  sync: {
+    state: () => ipcRenderer.invoke('sync:state') as Promise<SyncState>,
+    save: (patch: Partial<SyncSettings>) => ipcRenderer.invoke('sync:save', patch) as Promise<SyncState>,
+    start: () => ipcRenderer.invoke('sync:start') as Promise<SyncState>,
+    stop: () => ipcRenderer.invoke('sync:stop') as Promise<SyncState>,
+    chooseDir: () => ipcRenderer.invoke('sync:choose-dir') as Promise<{ canceled: boolean; dirPath?: string }>,
+    removeDevice: (deviceId: string) => ipcRenderer.invoke('sync:remove-device', deviceId) as Promise<SyncState>,
+    clearEvents: () => ipcRenderer.invoke('sync:clear-events') as Promise<SyncState>,
+    serialPorts: () => ipcRenderer.invoke('sync:serial-ports') as Promise<SerialPortInfo[]>,
+    btReceive: (portName: string) => ipcRenderer.invoke('sync:bt-receive', portName) as Promise<BtTransferResult>,
+    btSend: (portName: string, filePath: string) =>
+      ipcRenderer.invoke('sync:bt-send', portName, filePath) as Promise<BtTransferResult>,
+    btStart: (portName: string) => ipcRenderer.invoke('sync:bt-start', portName) as Promise<BtSyncStatus>,
+    btStop: () => ipcRenderer.invoke('sync:bt-stop') as Promise<BtSyncStatus>,
+    btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>
   },
   chat: {
     state: () => ipcRenderer.invoke('chat:state') as Promise<ChatState>,
