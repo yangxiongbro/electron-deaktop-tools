@@ -266,10 +266,9 @@ export class BtSyncSession {
         if (!path) break
         this.requested.delete(path)
         this.peerSkipped.add(path)
-        if (this.incoming.has(path)) {
-          this.incoming.delete(path)
-          this.options.onProgress?.(null)
-        }
+        this.incoming.delete(path)
+        // 不管有没有半截缓冲，都要把进度清掉，否则界面会停在上一次的百分比上
+        this.options.onProgress?.(null)
         this.options.onSkip?.(path)
         break
       }

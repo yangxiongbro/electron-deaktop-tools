@@ -147,8 +147,10 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
     },
     isCancelled: (path) => isCancelledPath(path),
     onSkip: (path) => {
+      // 对方取消了：本地进度也要立刻清掉，否则界面停在旧百分比
+      runtime.transfer = null
       runtime.lastLog = `对方取消了 ${path}`
-      pushBtStatus()
+      pushBtStatus(true)
     },
     log: (text, direction, meta) => {
       runtime.lastLog = text
