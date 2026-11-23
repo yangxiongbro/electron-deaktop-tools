@@ -69,6 +69,15 @@ function setTransfer(next: SyncTransfer | null): void {
 }
 
 /** 取消正在进行的传输（WiFi）。返回是否真的取消了一个任务 */
+export function isCancelledPath(path: string): boolean {
+  return cancelledPaths.has(path)
+}
+
+/** 重新开始同步时清空"已取消"清单 */
+export function clearCancelledPaths(): void {
+  cancelledPaths.clear()
+}
+
 export function cancelTransfer(): boolean {
   const abort = transferAbort
   transferAbort = null
@@ -80,7 +89,10 @@ export function cancelTransfer(): boolean {
   } catch {
     // 连接可能已经断了，忽略
   }
-  if (current) logEventOfCancel(current)
+  if (current) {
+    cancelledPaths.add(current.path)
+    logEventOfCancel(current)
+  }
   return true
 }
 
@@ -102,6 +114,8 @@ function logEventOfCancel(info: SyncTransfer): void {
   })()
 }
 let lastManifest: ManifestEntry[] = []
+/** 用户取消过传输的文件：本次同步内不再提供 / 接收，重新开始同步会清空 */
+const cancelledPaths = new Set<string>()
 /**
  * 开启同步那一刻的文件指纹（path → size:mtime）。
  * 只有「开启同步之后被新增 / 改动过」的文件才需要同步，历史文件不再全量传输。
@@ -373,6 +387,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, { ok: false, error: '非法路径' })
       return
     }
+    const downloadPath = url.searchParams.get('path') ?? ''
+    if (cancelledPaths.has(downloadPath)) {
+      // 这台设备是被取消的文件：直接告诉它跳过，别再重试
+      sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+      return
+    }
     try {
       const stat = await fsp.stat(target)
       if (!stat.isFile()) throw new Error('不是文件')
@@ -556,6 +576,7 @@ export async function saveSyncSettings(patch: Partial<SyncSettings>): Promise<Sy
 }
 
 export async function startSync(): Promise<SyncState> {
+  clearCancelledPaths()
   // 开启同步的这一刻打基线：此前的文件视为「已经同步过」
   await captureBaseline()
   return saveSyncSettings({ enabled: true })
@@ -586,6 +607,7 @@ export async function chooseSyncDir(dir: string): Promise<SyncState> {
 
 /** 应用启动时如果上次是「已开启」，自动把服务拉起来 */
 export async function bootstrapSync(): Promise<void> {
+  clearCancelledPaths()
   const store = await loadStore()
   if (!store.settings.enabled) return
   // 程序启动时同步是开着的：这一刻的文件同样视为「已同步」

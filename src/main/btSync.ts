@@ -42,6 +42,10 @@ export interface BtSyncOptions {
   reportReceivedMtime?: boolean
   /** 传输进度（null 表示当前没有传输） */
   onProgress?: (info: { path: string; sent: number; total: number; outgoing: boolean } | null) => void
+  /** 本端是否已取消这个文件（取消后不再发送） */
+  isCancelled?: (path: string) => boolean
+  /** 对方取消了某个文件 */
+  onSkip?: (path: string) => void
 }
 
 const CHUNK_SIZE = 32 * 1024
@@ -244,7 +248,23 @@ export class BtSyncSession {
       }
       case 'want': {
         const path = String(frame.header.p ?? '')
-        if (path) await this.sendFile(path)
+        if (!path) break
+        if (this.options.isCancelled?.(path)) {
+          // 这个文件在本端被取消过：告诉对方别再要
+          this.send({ t: 'skip', p: path })
+          this.options.log(`已跳过 ${path}（已取消）`, 'out')
+          break
+        }
+        await this.sendFile(path)
+        break
+      }
+      case 'skip': {
+        // 对方取消了某个文件：本次不再请求
+        const path = String(frame.header.p ?? '')
+        if (path) {
+          this.requested.delete(path)
+          this.options.onSkip?.(path)
+        }
         break
       }
       case 'file': {

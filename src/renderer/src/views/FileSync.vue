@@ -12,6 +12,8 @@ const busy = ref(false)
 const portInput = ref(45872)
 
 let timer: number | undefined
+/** 蓝牙模式下 1 秒刷新一次状态（进度变化快） */
+let btTimer: number | undefined
 const retryTimers: number[] = []
 /** 取消「传输进度」推送订阅 */
 let stopTransferPush: (() => void) | undefined
@@ -333,10 +335,18 @@ onMounted(async () => {
     void refresh()
     void refreshBtStatus()
   }, 4000)
+
+  // 蓝牙传输时进度更新频繁，单独 1 秒拉一次，避免只靠推送
+  btTimer = window.setInterval(() => {
+    if (document.hidden) return
+    if (mode.value !== 'bt' || !btStatus.value.running) return
+    void refreshBtStatus()
+  }, 1000)
 })
 
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
+  if (btTimer) window.clearInterval(btTimer)
   for (const handle of retryTimers) window.clearTimeout(handle)
   stopTransferPush?.()
   stopTransferPush = undefined

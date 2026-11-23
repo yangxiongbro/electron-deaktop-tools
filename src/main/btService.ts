@@ -3,7 +3,7 @@ import { BtSyncSession, requestBtCancel, type BtTransport } from './btSync'
 import { openBtLink, type BtLink } from './btBridge'
 import { hostname } from 'node:os'
 import type { SyncTransfer } from '@shared/types'
-import { recordSyncEvent, saveSyncSettings, syncState } from './sync'
+import { clearCancelledPaths, isCancelledPath, recordSyncEvent, saveSyncSettings, syncState } from './sync'
 
 /* ------------------------------------------------------------------ */
 /* 蓝牙自动同步服务：和 WiFi 同步一样，开着就一直盯着同步文件夹           */
@@ -129,6 +129,7 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
   runtime.sent = 0
   runtime.since = Date.now()
   runtime.lastLog = '正在等待手机连接…'
+  clearCancelledPaths()
 
   const transport: BtTransport = {
     send: (chunk: Buffer) => runtime.link?.write(chunk),
@@ -144,8 +145,14 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
       runtime.transfer = info
       pushBtStatus()
     },
+    isCancelled: (path) => isCancelledPath(path),
+    onSkip: (path) => {
+      runtime.lastLog = `对方取消了 ${path}`
+      pushBtStatus()
+    },
     log: (text, direction, meta) => {
       runtime.lastLog = text
+      pushBtStatus()
       if (text.startsWith('已连接')) {
         runtime.device = text.replace('已连接', '').trim()
       }
