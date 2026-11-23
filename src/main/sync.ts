@@ -405,8 +405,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       let sent = 0
       const filePath = url.searchParams.get('path') ?? ''
       transferAbort = () => {
+        // 先解除 pipe 再销毁，确保对端（手机）立刻收到连接关闭，不会挂着等数据
+        try {
+          stream.unpipe(res)
+        } catch {
+          // 忽略
+        }
         stream.destroy()
         res.destroy()
+        res.socket?.destroy()
       }
       setTransfer({ path: filePath, sent: 0, total: stat.size, outgoing: true })
       stream.on('data', (chunk: Buffer | string) => {
