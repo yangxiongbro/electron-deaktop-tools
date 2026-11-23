@@ -41,6 +41,9 @@ let serverPort = 0
 let watcher: ReturnType<typeof setInterval> | null = null
 let lastVersion = ''
 let transfer: SyncTransfer | null = null
+/** 正在传输的任务的中止函数（点「取消传输」时调用） */
+let transferAbort: (() => void) | null = null
+
 /** 上一次推给界面的传输状态，避免重复发送 */
 let lastPushedTransfer = ''
 let transferPushTimer: ReturnType<typeof setTimeout> | null = null
@@ -63,6 +66,40 @@ function setTransfer(next: SyncTransfer | null): void {
       win.webContents.send('sync:transfer', transfer)
     }
   }, 120)
+}
+
+/** 取消正在进行的传输（WiFi）。返回是否真的取消了一个任务 */
+export function cancelTransfer(): boolean {
+  const abort = transferAbort
+  transferAbort = null
+  const current = transfer
+  setTransfer(null)
+  if (!abort) return false
+  try {
+    abort()
+  } catch {
+    // 连接可能已经断了，忽略
+  }
+  if (current) logEventOfCancel(current)
+  return true
+}
+
+/** 取消时在「最近同步」里留一条记录，用户能看到是主动取消的 */
+function logEventOfCancel(info: SyncTransfer): void {
+  void (async () => {
+    try {
+      const store = await loadStore()
+      logEvent(store, {
+        direction: info.outgoing ? 'out' : 'in',
+        path: info.path,
+        device: '已取消',
+        size: Math.round(info.sent)
+      })
+      await persist()
+    } catch {
+      // 记录失败不影响取消
+    }
+  })()
 }
 let lastManifest: ManifestEntry[] = []
 /**
@@ -346,12 +383,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       })
       const stream = createReadStream(target)
       let sent = 0
-      setTransfer({ path: url.searchParams.get('path') ?? '', sent: 0, total: stat.size, outgoing: true })
+      const filePath = url.searchParams.get('path') ?? ''
+      transferAbort = () => {
+        stream.destroy()
+        res.destroy()
+      }
+      setTransfer({ path: filePath, sent: 0, total: stat.size, outgoing: true })
       stream.on('data', (chunk: Buffer | string) => {
         sent += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
-        setTransfer({ path: url.searchParams.get('path') ?? '', sent, total: stat.size, outgoing: true })
+        setTransfer({ path: filePath, sent, total: stat.size, outgoing: true })
       })
       const clear = (): void => {
+        transferAbort = null
         setTransfer(null)
       }
       res.on('close', clear)
@@ -374,10 +417,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     try {
       await fsp.mkdir(dirname(target), { recursive: true })
       const uploadPath = relativePath
+      transferAbort = () => req.destroy()
       setTransfer({ path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false })
       const body = await readBody(req, undefined, (sent, total) => {
         setTransfer({ path: uploadPath, sent, total: total || sent, outgoing: false })
       })
+      transferAbort = null
       setTransfer(null)
       const stream = createWriteStream(target)
       stream.end(body)

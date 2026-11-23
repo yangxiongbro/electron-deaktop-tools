@@ -45,6 +45,14 @@ export interface BtSyncOptions {
 }
 
 const CHUNK_SIZE = 32 * 1024
+/** 点「取消传输」时置位，发送 / 接收循环里检查 */
+let btCancelRequested = false
+
+/** 请求取消当前蓝牙传输（由 btService 调用） */
+export function requestBtCancel(): void {
+  btCancelRequested = true
+}
+
 const MANIFEST_INTERVAL_MS = 1500
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 
@@ -285,6 +293,12 @@ export class BtSyncSession {
       const chunk = data.subarray(offset, Math.min(offset + CHUNK_SIZE, data.length))
       this.send({ t: 'file', p: path, n: data.length, o: offset, m: Math.round(stat.mtimeMs) }, chunk)
       this.options.onProgress?.({ path, sent: offset + chunk.length, total: data.length, outgoing: true })
+      if (btCancelRequested) {
+        btCancelRequested = false
+        this.options.onProgress?.(null)
+        this.options.log(`已取消发送 ${path}`, 'out', { path, size: offset })
+        return
+      }
     }
     if (data.length === 0) this.send({ t: 'file', p: path, n: 0, o: 0, m: Math.round(stat.mtimeMs) })
     this.options.onProgress?.(null)
@@ -318,6 +332,13 @@ export class BtSyncSession {
     await fsp.appendFile(state.temp, frame.payload)
     state.received += frame.payload.length
     this.options.onProgress?.({ path, sent: state.received, total: size, outgoing: false })
+    if (btCancelRequested) {
+      btCancelRequested = false
+      this.incoming.delete(path)
+      this.options.onProgress?.(null)
+      this.options.log(`已取消接收 ${path}`, 'in', { path, size: state.received })
+      return
+    }
     if (state.received >= size) {
       this.incoming.delete(path)
       this.requested.delete(path)

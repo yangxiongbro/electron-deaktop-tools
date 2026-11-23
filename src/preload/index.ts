@@ -118,6 +118,14 @@ const api: DesktopApi = {
     btStart: (portName: string) => ipcRenderer.invoke('sync:bt-start', portName) as Promise<BtSyncStatus>,
     btStop: () => ipcRenderer.invoke('sync:bt-stop') as Promise<BtSyncStatus>,
     btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>,
+    /** 取消正在传输的任务 */
+    cancelTransfer: () => ipcRenderer.invoke('sync:cancel-transfer') as Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>,
+    /** 订阅蓝牙同步状态（含进度） */
+    onBtStatus: (listener: (status: BtSyncStatus) => void) => {
+      const handler = (_event: unknown, value: BtSyncStatus): void => listener(value)
+      ipcRenderer.on('sync:bt-status', handler)
+      return () => ipcRenderer.removeListener('sync:bt-status', handler)
+    },
     /** 订阅传输进度（主进程主动推送，不用等轮询） */
     onTransfer: (listener: (transfer: SyncTransfer | null) => void) => {
       const handler = (_event: unknown, value: SyncTransfer | null): void => listener(value)

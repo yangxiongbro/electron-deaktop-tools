@@ -793,6 +793,10 @@ export interface DesktopApi {
     btStatus(): Promise<BtSyncStatus>
     /** 订阅传输进度变化，返回取消订阅函数 */
     onTransfer(listener: (transfer: SyncTransfer | null) => void): () => void
+    /** 取消正在传输的任务（WiFi 或蓝牙） */
+    cancelTransfer(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>
+    /** 订阅蓝牙同步状态（含进度），返回取消订阅函数 */
+    onBtStatus(listener: (status: BtSyncStatus) => void): () => void
   }
   chat: {
     /** 读取聊天状态（首次会生成随机昵称与头像） */

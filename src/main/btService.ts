@@ -1,4 +1,5 @@
-import { BtSyncSession, type BtTransport } from './btSync'
+import { BrowserWindow } from 'electron'
+import { BtSyncSession, requestBtCancel, type BtTransport } from './btSync'
 import { openBtLink, type BtLink } from './btBridge'
 import { hostname } from 'node:os'
 import type { SyncTransfer } from '@shared/types'
@@ -45,6 +46,30 @@ export interface BtSyncStatus {
   since: number
   /** 当前正在传输的文件 */
   transfer: SyncTransfer | null
+}
+
+let btPushTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 把蓝牙状态推给界面。
+ *
+ * 界面 4 秒轮询一次，蓝牙传输往往一两秒就结束，所以进度变化时主动推送；
+ * 高频更新合并到 120ms 一次，force 时立即发。
+ */
+function pushBtStatus(force = false): void {
+  if (btPushTimer && !force) return
+  if (btPushTimer) {
+    clearTimeout(btPushTimer)
+    btPushTimer = null
+  }
+  btPushTimer = setTimeout(() => {
+    btPushTimer = null
+    const status = btStatus()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      win.webContents.send('sync:bt-status', status)
+    }
+  }, force ? 0 : 120)
 }
 
 export function btStatus(): BtSyncStatus {
@@ -117,6 +142,7 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
     deviceName: `${hostname()} 的电脑`,
     onProgress: (info) => {
       runtime.transfer = info
+      pushBtStatus()
     },
     log: (text, direction, meta) => {
       runtime.lastLog = text
@@ -148,6 +174,15 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
   await saveSyncSettings({ btEnabled: runtime.running, btPort: portName }).catch(() => undefined)
   void options
   return btStatus()
+}
+
+/** 取消正在进行的蓝牙传输（不断开连接） */
+export function cancelBtTransfer(): boolean {
+  if (!runtime.transfer) return false
+  requestBtCancel()
+  runtime.transfer = null
+  pushBtStatus(true)
+  return true
 }
 
 export function stopBtSync(clearLog = true): BtSyncStatus {

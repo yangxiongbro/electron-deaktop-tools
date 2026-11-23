@@ -15,6 +15,8 @@ let timer: number | undefined
 const retryTimers: number[] = []
 /** 取消「传输进度」推送订阅 */
 let stopTransferPush: (() => void) | undefined
+/** 取消「蓝牙状态」推送订阅 */
+let stopBtStatusPush: (() => void) | undefined
 
 const devices = computed(() => state.value?.devices ?? [])
 const events = computed(() => state.value?.events ?? [])
@@ -86,6 +88,23 @@ async function toggleCurrent(): Promise<void> {
     return
   }
   await startBt()
+}
+
+/** 取消正在传输的任务（WiFi 或蓝牙） */
+async function cancelTransfer(): Promise<void> {
+  try {
+    const result = await window.api.sync.cancelTransfer()
+    if (!result.ok) {
+      ElMessage.info('当前没有正在传输的任务')
+      return
+    }
+    state.value = state.value ? { ...state.value, transfer: null } : state.value
+    ElMessage.success('已取消传输')
+    await refresh()
+    await refreshBtStatus()
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
 }
 
 async function refreshAll(): Promise<void> {
@@ -296,6 +315,11 @@ onMounted(async () => {
     }, 10000)
   )
   await refreshBtStatus()
+  // 蓝牙状态（含进度）也由主进程推送
+  stopBtStatusPush = window.api.sync.onBtStatus((next) => {
+    btStatus.value = next
+  })
+
   // 传输进度由主进程主动推送（短传输也能看到）
   stopTransferPush = window.api.sync.onTransfer((next) => {
     if (!state.value) return
@@ -316,6 +340,8 @@ onUnmounted(() => {
   for (const handle of retryTimers) window.clearTimeout(handle)
   stopTransferPush?.()
   stopTransferPush = undefined
+  stopBtStatusPush?.()
+  stopBtStatusPush = undefined
 })
 </script>
 
@@ -447,7 +473,7 @@ onUnmounted(() => {
                   {{ activeTransfer.outgoing ? '下发' : '上传' }}
                 </el-tag>
                 <span class="transfer-path" :title="activeTransfer.path">{{ activeTransfer.path }}</span>
-                <span class="small muted">{{ transferPercent }}%</span>
+                <el-button size="small" type="danger" plain @click="cancelTransfer">取消</el-button>
               </div>
               <el-progress
                 :percentage="transferPercent"

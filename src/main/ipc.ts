@@ -28,7 +28,7 @@ import type {
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
 import { listSerialPorts, receiveOverBluetooth, sendOverBluetooth } from './btSerial'
-import { btStatus, startBtSync, stopBtSync } from './btService'
+import { btStatus, cancelBtTransfer, startBtSync, stopBtSync } from './btService'
 import {
   chooseSyncDir,
   clearSyncEvents,
@@ -36,7 +36,8 @@ import {
   saveSyncSettings,
   startSync,
   stopSync,
-  syncState
+  syncState,
+  cancelTransfer
 } from './sync'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
 import {
@@ -496,6 +497,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sync:start', () => startSync())
 
   ipcMain.handle('sync:stop', () => stopSync())
+
+  // 取消正在传输的任务：先试 WiFi，再试蓝牙
+  ipcMain.handle('sync:cancel-transfer', () => {
+    if (cancelTransfer()) return { ok: true, kind: 'wifi' as const }
+    if (cancelBtTransfer()) return { ok: true, kind: 'bt' as const }
+    return { ok: false, kind: '' as const }
+  })
 
   ipcMain.handle('sync:remove-device', (_event, deviceId: string) => removeSyncDevice(deviceId))
 
