@@ -151,6 +151,13 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
       runtime.transfer = null
       runtime.lastLog = `对方取消了 ${path}`
       pushBtStatus(true)
+      // 也记一条「最近同步」，界面上能看出来是对方取消的
+      void recordSyncEvent({
+        direction: 'in',
+        path,
+        device: `${runtime.device || '蓝牙设备'}（对方取消）`,
+        size: 0
+      })
     },
     log: (text, direction, meta) => {
       runtime.lastLog = text
@@ -202,7 +209,9 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
 
 /** 取消正在进行的蓝牙传输（不断开连接） */
 export function cancelBtTransfer(): boolean {
-  if (!runtime.transfer) return false
+  const current = runtime.transfer
+  if (!current) return false
+  runtime.session?.cancelTransfer(current.path)
   requestBtCancel()
   runtime.transfer = null
   pushBtStatus(true)

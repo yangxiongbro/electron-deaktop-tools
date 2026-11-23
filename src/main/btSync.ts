@@ -120,6 +120,8 @@ export class BtSyncSession {
   /** 正在接收的文件：p → { size, received, temp } */
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
   private closed = false
+  /** 本端取消过的文件：写进清单，确保对方一定知道（skip 帧丢了也能对齐） */
+  private readonly localSkipped = new Set<string>()
   /** 对方明确取消过的文件：本端立刻停发，且不再给它发 */
   private readonly peerSkipped = new Set<string>()
   /** 已发出、还没收完的 want：path → 时间戳（防止反复请求同一个文件） */
@@ -194,7 +196,8 @@ export class BtSyncSession {
     this.send({
       t: 'manifest',
       v: this.localVersion,
-      files: this.localFiles.map((file) => ({ p: file.path, s: file.size, m: file.mtime }))
+      files: this.localFiles.map((file) => ({ p: file.path, s: file.size, m: file.mtime })),
+      c: [...this.localSkipped]
     })
   }
 
@@ -229,6 +232,18 @@ export class BtSyncSession {
         break
       }
       case 'manifest': {
+        // 对方清单里带的「已取消」列表：即使 skip 帧丢了也能对齐
+        const cancelled = frame.header.c
+        if (Array.isArray(cancelled)) {
+          for (const item of cancelled) {
+            const path = String(item ?? '')
+            if (!path || this.peerSkipped.has(path)) continue
+            this.peerSkipped.add(path)
+            this.incoming.delete(path)
+            this.options.onProgress?.(null)
+            this.options.onSkip?.(path)
+          }
+        }
         const version = String(frame.header.v ?? '')
         if (version && version === this.lastRemoteVersion) break
         this.lastRemoteVersion = version
@@ -298,6 +313,15 @@ export class BtSyncSession {
       this.send({ t: 'want', p: path })
       this.options.log(`请求 ${path}`, 'out')
     }
+  }
+
+  /** 本端取消某个文件的传输：立即通知对方，并让清单带上取消信息 */
+  cancelTransfer(path: string): void {
+    btCancelRequested = true
+    if (!path) return
+    this.localSkipped.add(path)
+    this.send({ t: 'skip', p: path })
+    this.sendManifest()
   }
 
   private async sendFile(path: string): Promise<void> {
