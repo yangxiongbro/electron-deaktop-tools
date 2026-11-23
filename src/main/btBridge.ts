@@ -188,7 +188,7 @@ export async function openBtLink(portName: string, handlers: BtLinkHandlers): Pr
   /** 已写入但还没收到 ack 的块数（用于背压） */
   let inFlight = 0
   const waiters: (() => void)[] = []
-  const limit = 32
+  const limit = 8
 
   return {
     write(chunk: Buffer): void | Promise<void> {

@@ -120,6 +120,8 @@ export class BtSyncSession {
   /** 正在接收的文件：p → { size, received, temp } */
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
   private closed = false
+  /** 对方明确取消过的文件：本端立刻停发，且不再给它发 */
+  private readonly peerSkipped = new Set<string>()
   /** 已发出、还没收完的 want：path → 时间戳（防止反复请求同一个文件） */
   private requested = new Map<string, number>()
   /** 收到过的文件：path → { 应上报的 mtime, 落盘后的 mtime } */
@@ -249,7 +251,7 @@ export class BtSyncSession {
       case 'want': {
         const path = String(frame.header.p ?? '')
         if (!path) break
-        if (this.options.isCancelled?.(path)) {
+        if (this.peerSkipped.has(path) || this.options.isCancelled?.(path)) {
           // 这个文件在本端被取消过：告诉对方别再要
           this.send({ t: 'skip', p: path })
           this.options.log(`已跳过 ${path}（已取消）`, 'out')
@@ -259,12 +261,16 @@ export class BtSyncSession {
         break
       }
       case 'skip': {
-        // 对方取消了某个文件：本次不再请求
+        // 对方取消了这个文件：不再请求、也不再发送，并清掉半截接收缓冲
         const path = String(frame.header.p ?? '')
-        if (path) {
-          this.requested.delete(path)
-          this.options.onSkip?.(path)
+        if (!path) break
+        this.requested.delete(path)
+        this.peerSkipped.add(path)
+        if (this.incoming.has(path)) {
+          this.incoming.delete(path)
+          this.options.onProgress?.(null)
         }
+        this.options.onSkip?.(path)
         break
       }
       case 'file': {
@@ -315,10 +321,20 @@ export class BtSyncSession {
       const writing = this.send({ t: 'file', p: path, n: data.length, o: offset, m: Math.round(stat.mtimeMs) }, chunk)
       if (writing) await writing
       this.options.onProgress?.({ path, sent: offset + chunk.length, total: data.length, outgoing: true })
+      if (this.peerSkipped.has(path)) {
+        // 对方取消了：停发并清状态（它自己会清缓冲）
+        this.options.onProgress?.(null)
+        this.options.log(`对方取消了 ${path}，已停止发送`, 'out', { path, size: offset })
+        return
+      }
       if (btCancelRequested) {
         btCancelRequested = false
+        // 告诉对方「这个文件我取消了」，否则它的接收端会一直卡在进度上
+        this.send({ t: 'skip', p: path })
+        this.peerSkipped.add(path)
         this.options.onProgress?.(null)
-        this.options.log(`已取消发送 ${path}`, 'out', { path, size: offset })
+        this.options.onSkip?.(path)
+        this.options.log(`已取消发送 ${path}（本次同步不再重试）`, 'out', { path, size: offset })
         return
       }
     }
@@ -329,6 +345,18 @@ export class BtSyncSession {
 
   private async receiveChunk(frame: Frame): Promise<void> {
     const path = String(frame.header.p ?? '')
+    if (path && this.peerSkipped.has(path)) return
+    if (path && btCancelRequested) {
+      // 本端取消了接收：丢掉半截文件，并让对方停发
+      btCancelRequested = false
+      this.incoming.delete(path)
+      this.peerSkipped.add(path)
+      this.send({ t: 'skip', p: path })
+      this.options.onProgress?.(null)
+      this.options.onSkip?.(path)
+      this.options.log(`已取消接收 ${path}（本次同步不再重试）`, 'in')
+      return
+    }
     const size = Number(frame.header.n ?? 0)
     const offset = Number(frame.header.o ?? 0)
     if (!path || size < 0 || offset < 0) return
