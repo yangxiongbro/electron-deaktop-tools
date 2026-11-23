@@ -171,9 +171,24 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
   })
 
   try {
-    runtime.link = await connect(portName)
-    await runtime.session.attach(transport)
-    runtime.lastLog = '蓝牙已开启，等待手机连接…'
+    if (process.env.DSH_BT_SIMULATE === '1') {
+      // 调试用：不需要真蓝牙，把写出去的字节直接喂回自己，用来验证进度链路
+      runtime.link = { write: () => {}, close: () => {} } as unknown as BtLink
+      const loopback: BtTransport = {
+        // 每块延迟 2ms，模拟串口速度，方便验证进度显示
+        send: (chunk: Buffer) => {
+          runtime.session?.handleData(chunk)
+          return new Promise<void>((resolve) => setTimeout(resolve, 2))
+        },
+        close: () => undefined
+      }
+      await runtime.session.attach(loopback)
+      runtime.lastLog = '模拟蓝牙已连接'
+    } else {
+      runtime.link = await connect(portName)
+      await runtime.session.attach(transport)
+      runtime.lastLog = '蓝牙已开启，等待手机连接…'
+    }
   } catch (error) {
     runtime.running = false
     runtime.lastLog = (error as Error).message
@@ -189,6 +204,23 @@ export function cancelBtTransfer(): boolean {
   requestBtCancel()
   runtime.transfer = null
   pushBtStatus(true)
+  return true
+}
+
+/** 仅调试：模拟对方请求某个文件（配合 DSH_BT_SIMULATE=1） */
+export function debugBtWant(path: string): boolean {
+  if (process.env.DSH_BT_SIMULATE !== '1') return false
+  if (!runtime.session) return false
+  runtime.session.handleData(
+    Buffer.concat([
+      (() => {
+        const header = Buffer.from(JSON.stringify({ t: 'want', p: path }), 'utf8')
+        const prefix = Buffer.alloc(2)
+        prefix.writeUInt16BE(header.length, 0)
+        return Buffer.concat([prefix, header])
+      })()
+    ])
+  )
   return true
 }
 

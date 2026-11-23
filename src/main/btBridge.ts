@@ -18,7 +18,8 @@ export interface BtLinkHandlers {
 }
 
 export interface BtLink {
-  write: (chunk: Buffer) => void
+  /** 写入串口；缓冲满时返回 Promise，等底层真的写出去再 resolve */
+  write: (chunk: Buffer) => void | Promise<void>
   close: () => void
 }
 
@@ -98,6 +99,8 @@ try {
             $bytes = [Convert]::FromBase64String($line.Substring(2))
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush()
+            Write-Output 'A'
+            [Console]::Out.Flush()
           } catch {
             Note ("write failed: " + $_.Exception.Message)
           }
@@ -165,6 +168,12 @@ export async function openBtLink(portName: string, handlers: BtLinkHandlers): Pr
         }
       } else if (line === 'READY') {
         handlers.onData(Buffer.alloc(0))
+      } else if (line === 'A') {
+        if (inFlight > 0) inFlight -= 1
+        if (inFlight < limit) {
+          const next = waiters.shift()
+          if (next) next()
+        }
       }
       index = buffer.indexOf('\n')
     }
@@ -176,10 +185,23 @@ export async function openBtLink(portName: string, handlers: BtLinkHandlers): Pr
   child.on('exit', (code) => finish(`串口进程退出（${code ?? 0}）`))
   child.on('error', (error) => finish(`串口进程启动失败：${error.message}`))
 
+  /** 已写入但还没收到 ack 的块数（用于背压） */
+  let inFlight = 0
+  const waiters: (() => void)[] = []
+  const limit = 32
+
   return {
-    write(chunk: Buffer): void {
+    write(chunk: Buffer): void | Promise<void> {
       if (closed || child.killed) return
+      inFlight += 1
       child.stdin.write(`W ${chunk.toString('base64')}\n`)
+      if (inFlight < limit) return undefined
+      // 缓冲太多：等 ack 消化一部分再继续，避免「瞬间发完 50MB，界面看不到进度」
+      return new Promise<void>((resolve) => {
+        waiters.push(resolve)
+        // 兜底：万一 ack 丢了，最多等 3 秒，避免卡死
+        setTimeout(() => resolve(), 3000)
+      })
     },
     close(): void {
       if (closed) return

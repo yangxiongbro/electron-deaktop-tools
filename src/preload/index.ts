@@ -118,6 +118,8 @@ const api: DesktopApi = {
     btStart: (portName: string) => ipcRenderer.invoke('sync:bt-start', portName) as Promise<BtSyncStatus>,
     btStop: () => ipcRenderer.invoke('sync:bt-stop') as Promise<BtSyncStatus>,
     btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>,
+    /** 仅调试：模拟蓝牙对端请求文件 */
+    debugBtWant: (path: string) => ipcRenderer.invoke('sync:bt-debug-want', path) as Promise<boolean>,
     /** 取消正在传输的任务 */
     cancelTransfer: () => ipcRenderer.invoke('sync:cancel-transfer') as Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>,
     /** 订阅蓝牙同步状态（含进度） */

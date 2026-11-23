@@ -795,6 +795,8 @@ export interface DesktopApi {
     onTransfer(listener: (transfer: SyncTransfer | null) => void): () => void
     /** 取消正在传输的任务（WiFi 或蓝牙） */
     cancelTransfer(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>
+    /** 仅调试：模拟蓝牙对端请求文件（DSH_BT_SIMULATE=1） */
+    debugBtWant(path: string): Promise<boolean>
     /** 订阅蓝牙同步状态（含进度），返回取消订阅函数 */
     onBtStatus(listener: (status: BtSyncStatus) => void): () => void
   }

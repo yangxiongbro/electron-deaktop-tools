@@ -13,8 +13,8 @@ import { manifestVersion, scanSyncFolder, type ManifestEntry } from './syncFs'
 /* ------------------------------------------------------------------ */
 
 export interface BtTransport {
-  /** 往对端写字节 */
-  send(chunk: Buffer): void
+  /** 往对端写字节；缓冲满时可返回 Promise（背压） */
+  send(chunk: Buffer): void | Promise<void>
   close(): void
 }
 
@@ -179,10 +179,10 @@ export class BtSyncSession {
     }
   }
 
-  private send(header: Record<string, unknown>, payload: Buffer = Buffer.alloc(0)): void {
+  private send(header: Record<string, unknown>, payload: Buffer = Buffer.alloc(0)): void | Promise<void> {
     if (!this.transport) return
     try {
-      this.transport.send(encodeBtFrame(header, payload))
+      return this.transport.send(encodeBtFrame(header, payload))
     } catch (error) {
       this.options.log(`发送失败：${(error as Error).message}`, 'out')
     }
@@ -311,7 +311,9 @@ export class BtSyncSession {
     if (!data) return
     for (let offset = 0; offset < data.length; offset += CHUNK_SIZE) {
       const chunk = data.subarray(offset, Math.min(offset + CHUNK_SIZE, data.length))
-      this.send({ t: 'file', p: path, n: data.length, o: offset, m: Math.round(stat.mtimeMs) }, chunk)
+      // 等这一块真的写进串口缓冲（btBridge 有背压），否则大文件会「瞬间发完」，界面看不到进度
+      const writing = this.send({ t: 'file', p: path, n: data.length, o: offset, m: Math.round(stat.mtimeMs) }, chunk)
+      if (writing) await writing
       this.options.onProgress?.({ path, sent: offset + chunk.length, total: data.length, outgoing: true })
       if (btCancelRequested) {
         btCancelRequested = false

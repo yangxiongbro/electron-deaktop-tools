@@ -302,27 +302,13 @@ function whenText(at: number): string {
   return new Date(at).toLocaleDateString()
 }
 
-onMounted(async () => {
-  loading.value = true
-  await refresh()
-  await refreshPorts()
-  loading.value = false
-  // 首次枚举偶尔会被 PowerShell 启动拖慢（拿到空结果），这里补两次
-  retryTimers.push(
-    window.setTimeout(() => {
-      if (!serialPorts.value.length) void refreshPorts()
-    }, 4000),
-    window.setTimeout(() => {
-      if (!serialPorts.value.length) void refreshPorts()
-    }, 10000)
-  )
-  await refreshBtStatus()
-  // 蓝牙状态（含进度）也由主进程推送
+onMounted(() => {
+  // 先注册推送订阅与计时器：不能等下面的 IO（枚举串口 / 读状态）——那些一旦慢下来，
+  // 蓝牙进度就会一直不刷新（1.5.4 的真实问题就在这里）。
   stopBtStatusPush = window.api.sync.onBtStatus((next) => {
     btStatus.value = next
   })
 
-  // 传输进度由主进程主动推送（短传输也能看到）
   stopTransferPush = window.api.sync.onTransfer((next) => {
     if (!state.value) return
     state.value = { ...state.value, transfer: next }
@@ -336,12 +322,30 @@ onMounted(async () => {
     void refreshBtStatus()
   }, 4000)
 
-  // 蓝牙传输时进度更新频繁，单独 1 秒拉一次，避免只靠推送
+  // 蓝牙页签下每秒拉一次状态：进度更新频繁，只靠推送容易漏
   btTimer = window.setInterval(() => {
     if (document.hidden) return
-    if (mode.value !== 'bt' || !btStatus.value.running) return
+    if (mode.value !== 'bt') return
     void refreshBtStatus()
   }, 1000)
+
+  // 初始化放最后，异步进行
+  void (async () => {
+    loading.value = true
+    await refresh()
+    await refreshPorts()
+    loading.value = false
+    // 首次枚举偶尔会被 PowerShell 启动拖慢（拿到空结果），这里补两次
+    retryTimers.push(
+      window.setTimeout(() => {
+        if (!serialPorts.value.length) void refreshPorts()
+      }, 4000),
+      window.setTimeout(() => {
+        if (!serialPorts.value.length) void refreshPorts()
+      }, 10000)
+    )
+    await refreshBtStatus()
+  })()
 })
 
 onUnmounted(() => {

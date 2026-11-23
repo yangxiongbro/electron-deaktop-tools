@@ -28,7 +28,7 @@ import type {
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
 import { listSerialPorts, receiveOverBluetooth, sendOverBluetooth } from './btSerial'
-import { btStatus, cancelBtTransfer, startBtSync, stopBtSync } from './btService'
+import { btStatus, cancelBtTransfer, debugBtWant, startBtSync, stopBtSync } from './btService'
 import {
   chooseSyncDir,
   clearSyncEvents,
@@ -512,6 +512,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sync:serial-ports', () => listSerialPorts())
 
   ipcMain.handle('sync:bt-status', () => btStatus())
+
+  // 仅调试：模拟蓝牙对端请求文件（DSH_BT_SIMULATE=1 时才生效）
+  ipcMain.handle('sync:bt-debug-want', (_event, path: string) => debugBtWant(path))
 
   ipcMain.handle('sync:bt-start', async (_event, portName: string) => startBtSync(portName))
 
