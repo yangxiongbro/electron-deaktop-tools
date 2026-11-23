@@ -791,6 +791,8 @@ export interface DesktopApi {
     btStart(portName: string): Promise<BtSyncStatus>
     btStop(): Promise<BtSyncStatus>
     btStatus(): Promise<BtSyncStatus>
+    /** 订阅传输进度变化，返回取消订阅函数 */
+    onTransfer(listener: (transfer: SyncTransfer | null) => void): () => void
   }
   chat: {
     /** 读取聊天状态（首次会生成随机昵称与头像） */

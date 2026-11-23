@@ -28,7 +28,8 @@ import type {
   BtTransferResult,
   SerialPortInfo,
   SyncSettings,
-  SyncState
+  SyncState,
+  SyncTransfer
 } from '@shared/types'
 
 const api: DesktopApi = {
@@ -116,7 +117,13 @@ const api: DesktopApi = {
       ipcRenderer.invoke('sync:bt-send', portName, filePath) as Promise<BtTransferResult>,
     btStart: (portName: string) => ipcRenderer.invoke('sync:bt-start', portName) as Promise<BtSyncStatus>,
     btStop: () => ipcRenderer.invoke('sync:bt-stop') as Promise<BtSyncStatus>,
-    btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>
+    btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>,
+    /** 订阅传输进度（主进程主动推送，不用等轮询） */
+    onTransfer: (listener: (transfer: SyncTransfer | null) => void) => {
+      const handler = (_event: unknown, value: SyncTransfer | null): void => listener(value)
+      ipcRenderer.on('sync:transfer', handler)
+      return () => ipcRenderer.removeListener('sync:transfer', handler)
+    }
   },
   chat: {
     state: () => ipcRenderer.invoke('chat:state') as Promise<ChatState>,

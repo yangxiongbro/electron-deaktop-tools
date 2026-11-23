@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import { promises as fsp, createReadStream, createWriteStream } from 'node:fs'
+import { BrowserWindow } from 'electron'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { dirname, extname, join, normalize } from 'node:path'
 import type { SyncDevice, SyncEvent, SyncSettings, SyncState, SyncTransfer } from '@shared/types'
@@ -40,6 +41,29 @@ let serverPort = 0
 let watcher: ReturnType<typeof setInterval> | null = null
 let lastVersion = ''
 let transfer: SyncTransfer | null = null
+/** 上一次推给界面的传输状态，避免重复发送 */
+let lastPushedTransfer = ''
+let transferPushTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 更新当前传输状态，并推给界面。
+ *
+ * 文件传输往往只持续一两秒，界面 4 秒轮询会漏掉，所以这里主动推送（高频更新合并到 120ms）。
+ */
+function setTransfer(next: SyncTransfer | null): void {
+  transfer = next
+  const key = next ? `${next.path}|${next.sent}|${next.total}|${next.outgoing}` : ''
+  if (key === lastPushedTransfer) return
+  lastPushedTransfer = key
+  if (transferPushTimer) return
+  transferPushTimer = setTimeout(() => {
+    transferPushTimer = null
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      win.webContents.send('sync:transfer', transfer)
+    }
+  }, 120)
+}
 let lastManifest: ManifestEntry[] = []
 /**
  * 开启同步那一刻的文件指纹（path → size:mtime）。
@@ -322,13 +346,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       })
       const stream = createReadStream(target)
       let sent = 0
-      transfer = { path: url.searchParams.get('path') ?? '', sent: 0, total: stat.size, outgoing: true }
+      setTransfer({ path: url.searchParams.get('path') ?? '', sent: 0, total: stat.size, outgoing: true })
       stream.on('data', (chunk: Buffer | string) => {
         sent += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
-        transfer = { path: url.searchParams.get('path') ?? '', sent, total: stat.size, outgoing: true }
+        setTransfer({ path: url.searchParams.get('path') ?? '', sent, total: stat.size, outgoing: true })
       })
       const clear = (): void => {
-        transfer = null
+        setTransfer(null)
       }
       res.on('close', clear)
       stream.on('error', clear)
@@ -350,11 +374,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     try {
       await fsp.mkdir(dirname(target), { recursive: true })
       const uploadPath = relativePath
-      transfer = { path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false }
+      setTransfer({ path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false })
       const body = await readBody(req, undefined, (sent, total) => {
-        transfer = { path: uploadPath, sent, total: total || sent, outgoing: false }
+        setTransfer({ path: uploadPath, sent, total: total || sent, outgoing: false })
       })
-      transfer = null
+      setTransfer(null)
       const stream = createWriteStream(target)
       stream.end(body)
       await new Promise<void>((resolve, reject) => {

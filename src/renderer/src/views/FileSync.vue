@@ -13,6 +13,8 @@ const portInput = ref(45872)
 
 let timer: number | undefined
 const retryTimers: number[] = []
+/** 取消「传输进度」推送订阅 */
+let stopTransferPush: (() => void) | undefined
 
 const devices = computed(() => state.value?.devices ?? [])
 const events = computed(() => state.value?.events ?? [])
@@ -294,6 +296,14 @@ onMounted(async () => {
     }, 10000)
   )
   await refreshBtStatus()
+  // 传输进度由主进程主动推送（短传输也能看到）
+  stopTransferPush = window.api.sync.onTransfer((next) => {
+    if (!state.value) return
+    state.value = { ...state.value, transfer: next }
+    // 传完立刻拉一次状态：本次数量与「最近同步」不用等 4 秒轮询
+    if (!next) void refresh()
+  })
+
   timer = window.setInterval(() => {
     if (document.hidden) return
     void refresh()
@@ -304,6 +314,8 @@ onMounted(async () => {
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
   for (const handle of retryTimers) window.clearTimeout(handle)
+  stopTransferPush?.()
+  stopTransferPush = undefined
 })
 </script>
 
