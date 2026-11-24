@@ -115,6 +115,8 @@ export class BtSyncSession {
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
   private closed = false
   /** 正在发送的文件：避免同一条 want 触发并发发送 */
+  /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
+  private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
   /** 本端取消过的文件：写进清单，确保对方一定知道（skip 帧丢了也能对齐） */
   private readonly localSkipped = new Set<string>()
@@ -155,7 +157,7 @@ export class BtSyncSession {
       clearInterval(this.timer)
       this.timer = null
     }
-    this.options.onProgress?.(null)
+    this.emitProgress(null)
     const transport = this.transport
     this.transport = null
     this.remoteFiles.clear()
@@ -237,7 +239,7 @@ export class BtSyncSession {
             const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
             this.peerSkipped.add(path)
             this.incoming.delete(path)
-            this.options.onProgress?.(null)
+            this.emitProgress(null)
             if (!wasKnown) this.options.onSkip?.(path)
           }
         }
@@ -282,7 +284,7 @@ export class BtSyncSession {
         const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
         this.peerSkipped.add(path)
         this.incoming.delete(path)
-        this.options.onProgress?.(null)
+        this.emitProgress(null)
         if (!wasKnown) this.options.onSkip?.(path)
         break
       }
@@ -312,6 +314,15 @@ export class BtSyncSession {
       this.send({ t: 'want', p: path })
       this.options.log(`请求 ${path}`, 'out')
     }
+  }
+
+  /** 取消过的文件不再上报进度，避免取消后界面又冒出一条进度 */
+  private emitProgress(info: { path: string; sent: number; total: number; outgoing: boolean } | null): void {
+    if (info && (this.localSkipped.has(info.path) || this.peerSkipped.has(info.path))) {
+      this.emitProgress(null)
+      return
+    }
+    this.emitProgress(info)
   }
 
   /** 本端取消某个文件的传输：立即通知对方，并让清单带上取消信息 */
@@ -348,18 +359,18 @@ export class BtSyncSession {
       this.options.onProgress?.({ path, sent: offset + chunk.length, total: data.length, outgoing: true })
       if (this.peerSkipped.has(path)) {
         // 对方取消了：停发并清状态（它自己会清缓冲）
-        this.options.onProgress?.(null)
+        this.emitProgress(null)
         this.options.log(`对方取消了 ${path}，已停止发送`, 'out', { path, size: offset })
         return
       }
       if (this.localSkipped.has(path)) {
         // 本端取消了（cancelTransfer 已经把 skip 发出去并记了日志）
-        this.options.onProgress?.(null)
+        this.emitProgress(null)
         return
       }
     }
     if (data.length === 0) this.send({ t: 'file', p: path, n: 0, o: 0, m: Math.round(stat.mtimeMs) })
-    this.options.onProgress?.(null)
+    this.emitProgress(null)
     this.options.log(`已发送 ${path}（${(data.length / 1024).toFixed(0)} KB）`, 'out', { path, size: data.length })
   }
 
@@ -367,7 +378,7 @@ export class BtSyncSession {
     const path = String(frame.header.p ?? '')
     if (path && (this.peerSkipped.has(path) || this.localSkipped.has(path))) {
       this.incoming.delete(path)
-      this.options.onProgress?.(null)
+      this.emitProgress(null)
       return
     }
     const size = Number(frame.header.n ?? 0)
@@ -415,7 +426,9 @@ export class BtSyncSession {
           diskMtime: Math.round(stat?.mtimeMs ?? Date.now())
         })
       }
-      this.options.onProgress?.(null)
+      // 刚收完：30 秒内不再为同一个文件去请求（防止两端 mtime 对不齐时来回重传）
+      this.completed.set(path, { size, at: Date.now() })
+      this.emitProgress(null)
       this.options.log(`收到 ${path}（${(size / 1024).toFixed(0)} KB）`, 'in', { path, size })
       await this.refreshLocal(true)
     }

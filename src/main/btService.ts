@@ -21,6 +21,8 @@ interface BtRuntime {
   sent: number
   since: number
   transfer: SyncTransfer | null
+  /** 最近一次进度更新的时间，用于判断进度是否已经过期 */
+  transferAt: number
 }
 
 const runtime: BtRuntime = {
@@ -33,7 +35,8 @@ const runtime: BtRuntime = {
   received: 0,
   sent: 0,
   since: 0,
-  transfer: null
+  transfer: null,
+  transferAt: 0
 }
 
 export interface BtSyncStatus {
@@ -81,7 +84,8 @@ export function btStatus(): BtSyncStatus {
     received: runtime.received,
     sent: runtime.sent,
     since: runtime.since,
-    transfer: runtime.transfer
+    // 超过 6 秒没有新的进度更新，就当这次传输已经结束了（避免界面卡在某个百分比）
+    transfer: runtime.transfer && Date.now() - runtime.transferAt < 6000 ? runtime.transfer : null
   }
 }
 
@@ -143,6 +147,7 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
     deviceName: `${hostname()} 的电脑`,
     onProgress: (info) => {
       runtime.transfer = info
+      runtime.transferAt = Date.now()
       pushBtStatus()
     },
     isCancelled: (path) => isCancelledPath(path),
@@ -214,6 +219,13 @@ export function cancelBtTransfer(): boolean {
   runtime.session?.cancelTransfer(current.path)
   runtime.transfer = null
   pushBtStatus(true)
+  // 本端取消也要在「最近同步」里留一条，便于对照两端日志
+  void recordSyncEvent({
+    direction: current.outgoing ? 'out' : 'in',
+    path: current.path,
+    device: `${runtime.device || '蓝牙设备'}（已取消）`,
+    size: Math.round(current.sent)
+  })
   return true
 }
 
