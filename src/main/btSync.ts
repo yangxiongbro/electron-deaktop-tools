@@ -115,6 +115,8 @@ export class BtSyncSession {
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
   private closed = false
   /** 正在发送的文件：避免同一条 want 触发并发发送 */
+  /** 上一次为某个路径记「对方取消」日志的时间，用来去重（2 秒内只记一条） */
+  private readonly skipLogAt = new Map<string, number>()
   /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
   private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
@@ -146,8 +148,11 @@ export class BtSyncSession {
     this.send({ t: 'hello', name: this.options.deviceName })
     this.sendManifest()
     if (this.timer) clearInterval(this.timer)
+    let ticks = 0
     this.timer = setInterval(() => {
-      void this.refreshLocal(false)
+      ticks += 1
+      // 约每 10 秒强制发一次清单：版本号没变化时也能让对方发现新增文件
+      void this.refreshLocal(ticks % 7 === 0)
     }, MANIFEST_INTERVAL_MS)
   }
 
@@ -236,11 +241,7 @@ export class BtSyncSession {
           for (const item of cancelled) {
             const path = String(item ?? '')
             if (!path) continue
-            const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
-            this.peerSkipped.add(path)
-            this.incoming.delete(path)
-            this.emitProgress(null)
-            if (!wasKnown) this.options.onSkip?.(path)
+            this.notePeerSkip(path)
           }
         }
         const version = String(frame.header.v ?? '')
@@ -281,11 +282,7 @@ export class BtSyncSession {
         const path = String(frame.header.p ?? '')
         if (!path) break
         this.requested.delete(path)
-        const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
-        this.peerSkipped.add(path)
-        this.incoming.delete(path)
-        this.emitProgress(null)
-        if (!wasKnown) this.options.onSkip?.(path)
+        this.notePeerSkip(path)
         break
       }
       case 'file': {
@@ -314,6 +311,17 @@ export class BtSyncSession {
       this.send({ t: 'want', p: path })
       this.options.log(`请求 ${path}`, 'out')
     }
+  }
+
+  /** 对方取消：清进度 + 记一条日志（2 秒内去重，重复帧不会写两条） */
+  private notePeerSkip(path: string): void {
+    this.peerSkipped.add(path)
+    this.incoming.delete(path)
+    this.emitProgress(null)
+    const last = this.skipLogAt.get(path) ?? 0
+    if (Date.now() - last < 2000) return
+    this.skipLogAt.set(path, Date.now())
+    this.options.onSkip?.(path)
   }
 
   /** 取消过的文件不再上报进度，避免取消后界面又冒出一条进度 */

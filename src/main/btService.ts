@@ -115,12 +115,19 @@ async function connect(portName: string): Promise<BtLink> {
   throw new Error(lastError || '蓝牙串口没有连上')
 }
 
+let restarting = false
+
 async function restart(): Promise<void> {
-  if (!runtime.running) return
-  const port = runtime.port
-  stopBtSync(false)
-  await sleep(1500)
-  if (port) await startBtSync(port, { keep: true }).catch(() => undefined)
+  if (!runtime.running || restarting) return
+  restarting = true
+  try {
+    const port = runtime.port
+    stopBtSync(false)
+    await sleep(1500)
+    if (port) await startBtSync(port, { keep: true }).catch(() => undefined)
+  } finally {
+    restarting = false
+  }
 }
 
 export async function startBtSync(portName: string, options: { keep?: boolean } = {}): Promise<BtSyncStatus> {
@@ -247,15 +254,22 @@ export function debugBtWant(path: string): boolean {
 }
 
 export function stopBtSync(clearLog = true): BtSyncStatus {
-  runtime.session?.detach()
+  // 先把 running 置 false：否则 link.close() 会触发 onClose -> restart() -> stopBtSync 无限递归
+  runtime.running = false
+  const session = runtime.session
+  const link = runtime.link
   runtime.session = null
+  runtime.link = null
   try {
-    runtime.link?.close()
+    session?.detach()
   } catch {
     // 忽略
   }
-  runtime.link = null
-  runtime.running = false
+  try {
+    link?.close()
+  } catch {
+    // 忽略
+  }
   if (clearLog) runtime.lastLog = '蓝牙同步已停止'
   void saveSyncSettings({ btEnabled: false }).catch(() => undefined)
   return btStatus()
