@@ -1,5 +1,5 @@
 import { BrowserWindow } from 'electron'
-import { BtSyncSession, requestBtCancel, type BtTransport } from './btSync'
+import { BtSyncSession, type BtTransport } from './btSync'
 import { openBtLink, type BtLink } from './btBridge'
 import { hostname } from 'node:os'
 import type { SyncTransfer } from '@shared/types'
@@ -212,7 +212,6 @@ export function cancelBtTransfer(): boolean {
   const current = runtime.transfer
   if (!current) return false
   runtime.session?.cancelTransfer(current.path)
-  requestBtCancel()
   runtime.transfer = null
   pushBtStatus(true)
   return true

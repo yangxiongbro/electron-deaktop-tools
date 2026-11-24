@@ -49,13 +49,7 @@ export interface BtSyncOptions {
 }
 
 const CHUNK_SIZE = 32 * 1024
-/** 点「取消传输」时置位，发送 / 接收循环里检查 */
-let btCancelRequested = false
 
-/** 请求取消当前蓝牙传输（由 btService 调用） */
-export function requestBtCancel(): void {
-  btCancelRequested = true
-}
 
 const MANIFEST_INTERVAL_MS = 1500
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -120,6 +114,8 @@ export class BtSyncSession {
   /** 正在接收的文件：p → { size, received, temp } */
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
   private closed = false
+  /** 正在发送的文件：避免同一条 want 触发并发发送 */
+  private readonly sending = new Set<string>()
   /** 本端取消过的文件：写进清单，确保对方一定知道（skip 帧丢了也能对齐） */
   private readonly localSkipped = new Set<string>()
   /** 对方明确取消过的文件：本端立刻停发，且不再给它发 */
@@ -237,11 +233,12 @@ export class BtSyncSession {
         if (Array.isArray(cancelled)) {
           for (const item of cancelled) {
             const path = String(item ?? '')
-            if (!path || this.peerSkipped.has(path)) continue
+            if (!path) continue
+            const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
             this.peerSkipped.add(path)
             this.incoming.delete(path)
             this.options.onProgress?.(null)
-            this.options.onSkip?.(path)
+            if (!wasKnown) this.options.onSkip?.(path)
           }
         }
         const version = String(frame.header.v ?? '')
@@ -266,13 +263,15 @@ export class BtSyncSession {
       case 'want': {
         const path = String(frame.header.p ?? '')
         if (!path) break
-        if (this.peerSkipped.has(path) || this.options.isCancelled?.(path)) {
+        if (this.peerSkipped.has(path) || this.localSkipped.has(path) || this.options.isCancelled?.(path)) {
           // 这个文件在本端被取消过：告诉对方别再要
           this.send({ t: 'skip', p: path })
-          this.options.log(`已跳过 ${path}（已取消）`, 'out')
           break
         }
-        await this.sendFile(path)
+        if (this.sending.has(path)) break
+        this.sending.add(path)
+        // 关键：异步发送。await 会把收帧循环卡住，发送期间收不到对方的取消
+        void this.sendFile(path).finally(() => this.sending.delete(path))
         break
       }
       case 'skip': {
@@ -280,11 +279,11 @@ export class BtSyncSession {
         const path = String(frame.header.p ?? '')
         if (!path) break
         this.requested.delete(path)
+        const wasKnown = this.peerSkipped.has(path) || this.localSkipped.has(path)
         this.peerSkipped.add(path)
         this.incoming.delete(path)
-        // 不管有没有半截缓冲，都要把进度清掉，否则界面会停在上一次的百分比上
         this.options.onProgress?.(null)
-        this.options.onSkip?.(path)
+        if (!wasKnown) this.options.onSkip?.(path)
         break
       }
       case 'file': {
@@ -317,11 +316,14 @@ export class BtSyncSession {
 
   /** 本端取消某个文件的传输：立即通知对方，并让清单带上取消信息 */
   cancelTransfer(path: string): void {
-    btCancelRequested = true
     if (!path) return
+    const had = this.localSkipped.has(path)
     this.localSkipped.add(path)
-    this.send({ t: 'skip', p: path })
-    this.sendManifest()
+    this.incoming.delete(path)
+    if (!had) {
+      this.send({ t: 'skip', p: path })
+      this.sendManifest()
+    }
   }
 
   private async sendFile(path: string): Promise<void> {
@@ -350,14 +352,9 @@ export class BtSyncSession {
         this.options.log(`对方取消了 ${path}，已停止发送`, 'out', { path, size: offset })
         return
       }
-      if (btCancelRequested) {
-        btCancelRequested = false
-        // 告诉对方「这个文件我取消了」，否则它的接收端会一直卡在进度上
-        this.send({ t: 'skip', p: path })
-        this.peerSkipped.add(path)
+      if (this.localSkipped.has(path)) {
+        // 本端取消了（cancelTransfer 已经把 skip 发出去并记了日志）
         this.options.onProgress?.(null)
-        this.options.onSkip?.(path)
-        this.options.log(`已取消发送 ${path}（本次同步不再重试）`, 'out', { path, size: offset })
         return
       }
     }
@@ -368,16 +365,9 @@ export class BtSyncSession {
 
   private async receiveChunk(frame: Frame): Promise<void> {
     const path = String(frame.header.p ?? '')
-    if (path && this.peerSkipped.has(path)) return
-    if (path && btCancelRequested) {
-      // 本端取消了接收：丢掉半截文件，并让对方停发
-      btCancelRequested = false
+    if (path && (this.peerSkipped.has(path) || this.localSkipped.has(path))) {
       this.incoming.delete(path)
-      this.peerSkipped.add(path)
-      this.send({ t: 'skip', p: path })
       this.options.onProgress?.(null)
-      this.options.onSkip?.(path)
-      this.options.log(`已取消接收 ${path}（本次同步不再重试）`, 'in')
       return
     }
     const size = Number(frame.header.n ?? 0)
@@ -405,13 +395,6 @@ export class BtSyncSession {
     await fsp.appendFile(state.temp, frame.payload)
     state.received += frame.payload.length
     this.options.onProgress?.({ path, sent: state.received, total: size, outgoing: false })
-    if (btCancelRequested) {
-      btCancelRequested = false
-      this.incoming.delete(path)
-      this.options.onProgress?.(null)
-      this.options.log(`已取消接收 ${path}`, 'in', { path, size: state.received })
-      return
-    }
     if (state.received >= size) {
       this.incoming.delete(path)
       this.requested.delete(path)
