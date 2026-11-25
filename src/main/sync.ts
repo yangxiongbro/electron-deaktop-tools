@@ -1,3 +1,4 @@
+import { transferHub } from './transferHub'
 import { app } from 'electron'
 import { promises as fsp, createReadStream, createWriteStream } from 'node:fs'
 import { BrowserWindow } from 'electron'
@@ -55,6 +56,9 @@ let transferPushTimer: ReturnType<typeof setTimeout> | null = null
  */
 function setTransfer(next: SyncTransfer | null): void {
   transfer = next
+  // 统一报到中枢：界面上的「取消」针对的就是这里记录的当前传输
+  if (next) transferHub.report('wifi', next.path, next.outgoing, next.sent, next.total)
+  else transferHub.finish('wifi')
   const key = next ? `${next.path}|${next.sent}|${next.total}|${next.outgoing}` : ''
   if (key === lastPushedTransfer) return
   lastPushedTransfer = key
@@ -70,7 +74,8 @@ function setTransfer(next: SyncTransfer | null): void {
 
 /** 取消正在进行的传输（WiFi）。返回是否真的取消了一个任务 */
 export function isCancelledPath(path: string): boolean {
-  return cancelledPaths.has(path)
+  // 以中枢的取消登记表为准（三条通道共用同一份）
+  return cancelledPaths.has(path) || transferHub.isCancelled(path)
 }
 
 /** 重新开始同步时清空"已取消"清单 */
@@ -91,9 +96,15 @@ export function cancelTransfer(): boolean {
   }
   if (current) {
     cancelledPaths.add(current.path)
+    transferHub.markCancelled(current.path, 'local')
     logEventOfCancel(current)
   }
   return true
+}
+
+/** 把 WiFi（本机作服务端）的取消实现注册到传输中枢 */
+export function registerWifiCancel(): void {
+  transferHub.register('wifi', () => cancelTransfer())
 }
 
 /** 取消时在「最近同步」里留一条记录，用户能看到是主动取消的 */

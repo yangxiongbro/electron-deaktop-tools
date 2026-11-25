@@ -29,8 +29,9 @@ import type {
 } from '@shared/types'
 import { formatJsonFile } from './jsonFile'
 import { listSerialPorts, receiveOverBluetooth, sendOverBluetooth } from './btSerial'
-import { btStatus, cancelBtTransfer, debugBtWant, startBtSync, stopBtSync } from './btService'
+import { btStatus, debugBtWant, registerBtCancel, startBtSync, stopBtSync } from './btService'
 import { peerSync } from './syncPeer'
+import { transferHub } from './transferHub'
 import {
   chooseSyncDir,
   clearSyncEvents,
@@ -39,7 +40,7 @@ import {
   startSync,
   stopSync,
   syncState,
-  cancelTransfer
+  registerWifiCancel
 } from './sync'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
 import {
@@ -502,11 +503,15 @@ export function registerIpcHandlers(): void {
 
   // 取消正在传输的任务：先试 WiFi，再试蓝牙
   ipcMain.handle('sync:cancel-transfer', () => {
-    if (cancelTransfer()) return { ok: true, kind: 'wifi' as const }
-    if (cancelBtTransfer()) return { ok: true, kind: 'bt' as const }
-    if (peerSync.cancel()) return { ok: true, kind: 'peer' as const }
-    return { ok: false, kind: '' as const }
+    // 中枢知道当前是哪个通道在传，取消不再按通道顺序试探
+    const result = transferHub.cancel()
+    return { ok: result.ok, kind: result.kind }
   })
+
+  // 三条通道把自己的取消实现注册到中枢（只注册一次）
+  registerWifiCancel()
+  registerBtCancel()
+  transferHub.register('peer', () => peerSync.cancel())
 
   ipcMain.handle('sync:remove-device', (_event, deviceId: string) => removeSyncDevice(deviceId))
 

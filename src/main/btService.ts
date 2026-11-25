@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron'
 import { BtSyncSession, type BtTransport } from './btSync'
+import { transferHub } from './transferHub'
 import { openBtLink, type BtLink } from './btBridge'
 import { hostname } from 'node:os'
 import type { SyncTransfer } from '@shared/types'
@@ -155,6 +156,12 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
     onProgress: (info) => {
       runtime.transfer = info
       runtime.transferAt = Date.now()
+      if (info) {
+        // 统一报到中枢：界面上的「取消」永远针对这里记录的当前传输
+        transferHub.report('bt', info.path, info.outgoing, info.sent, info.total)
+      } else {
+        transferHub.finish('bt')
+      }
       pushBtStatus()
     },
     isCancelled: (path) => isCancelledPath(path),
@@ -245,6 +252,11 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
 }
 
 /** 取消正在进行的蓝牙传输（不断开连接） */
+/** 把蓝牙的取消实现注册到传输中枢 */
+export function registerBtCancel(): void {
+  transferHub.register('bt', () => cancelBtTransfer())
+}
+
 export function cancelBtTransfer(): boolean {
   const session = runtime.session
   // 以会话记录的当前传输为准（进度回调会更新它），拿不到再退回本地的 runtime.transfer

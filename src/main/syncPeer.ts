@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { request as httpRequest, type IncomingMessage } from 'node:http'
 import type { SyncPeerState, SyncTransfer } from '@shared/types'
 import { scanSyncFolder, type ManifestEntry } from './syncFs'
+import { transferHub } from './transferHub'
 import { recordSyncEvent } from './sync'
 
 const INTERVAL_MS = 3000
@@ -54,6 +55,8 @@ class PeerSync {
 
   private setTransfer(info: SyncTransfer | null): void {
     this.state.transfer = info
+    if (info) transferHub.report('peer', info.path, info.outgoing, info.sent, info.total)
+    else transferHub.finish('peer')
     this.push()
   }
 
