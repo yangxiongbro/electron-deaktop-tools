@@ -130,6 +130,8 @@ export class BtSyncSession {
   private receivedStamp = new Map<string, { reportMtime: number; diskMtime: number }>()
   /** 开启同步那一刻的指纹：只有之后新增 / 改动的文件才上报、才同步 */
   private baseline = new Map<string, string>()
+  /** 刚收/发过的文件指纹（path -> 大小:修改时间），用于防止两端来回重传 */
+  private syncedAt = new Map<string, string>()
   private lastRemoteVersion = ''
 
   constructor(private readonly options: BtSyncOptions) {}
@@ -202,7 +204,9 @@ export class BtSyncSession {
       t: 'manifest',
       v: this.localVersion,
       files: this.localFiles.map((file) => ({ p: file.path, s: file.size, m: file.mtime })),
-      c: [...this.localSkipped]
+      c: [...this.localSkipped],
+      // 已同步指纹：对方据此跳过重复传输
+      s: [...this.syncedAt.entries()].map(([path, stamp]) => [path, stamp])
     })
   }
 
@@ -244,6 +248,14 @@ export class BtSyncSession {
             const path = String(item ?? '')
             if (!path) continue
             this.notePeerSkip(path)
+          }
+        }
+        const synced = frame.header.s
+        if (Array.isArray(synced)) {
+          for (const item of synced) {
+            if (Array.isArray(item) && typeof item[0] === 'string' && typeof item[1] === 'string') {
+              this.syncedAt.set(item[0], item[1])
+            }
           }
         }
         const version = String(frame.header.v ?? '')
@@ -305,6 +317,9 @@ export class BtSyncSession {
       const mine = local.get(path)
       // 大小与修改时间都对得上 → 认定是同一份，跳过
       if (mine && mine.size === remote.size && Math.abs(mine.mtime - remote.mtime) <= 2000) continue
+      // 刚收/发过同一个文件（指纹一致）→ 认定已同步，跳过，避免来回重传
+      const synced = this.syncedAt.get(path)
+      if (synced && synced === `${remote.size}:${remote.mtime}`) continue
       // 自己这份更新，等对方来拉，避免互相覆盖
       if (mine && mine.mtime > remote.mtime) continue
       const pendingAt = this.requested.get(path)
@@ -382,6 +397,9 @@ export class BtSyncSession {
       }
     }
     if (data.length === 0) this.send({ t: 'file', p: path, n: 0, o: 0, m: Math.round(stat.mtimeMs) })
+    // 发完把它记进基线，避免每轮清单都把它当「变化」再发给对方
+    this.baseline.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
+    this.syncedAt.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
     this.emitProgress(null)
     this.options.log(`已发送 ${path}（${(data.length / 1024).toFixed(0)} KB）`, 'out', { path, size: data.length })
   }
@@ -438,7 +456,10 @@ export class BtSyncSession {
           diskMtime: Math.round(stat?.mtimeMs ?? Date.now())
         })
       }
-      // 刚收完：30 秒内不再为同一个文件去请求（防止两端 mtime 对不齐时来回重传）
+      // 刚收完：记下最终指纹，既不再请求、也不再当成「本地变化」推回去
+      const stampText = `${size}:${mtime > 0 ? mtime : Date.now()}`
+      this.baseline.set(path, stampText)
+      this.syncedAt.set(path, stampText)
       this.completed.set(path, { size, at: Date.now() })
       this.emitProgress(null)
       this.options.log(`收到 ${path}（${(size / 1024).toFixed(0)} KB）`, 'in', { path, size })
