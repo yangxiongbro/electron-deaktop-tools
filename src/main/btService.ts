@@ -181,23 +181,36 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
         size: 0
       })
     },
+    onSent: (path, size) => {
+      runtime.sent += 1
+      runtime.lastLog = `已发送 ${path}（${Math.round(size / 1024)} KB）`
+      pushBtStatus()
+      void recordSyncEvent({
+        direction: 'out',
+        path,
+        device: runtime.device || '蓝牙设备',
+        size
+      })
+    },
+    onReceived: (path, size) => {
+      runtime.received += 1
+      runtime.lastLog = `收到 ${path}（${Math.round(size / 1024)} KB）`
+      pushBtStatus()
+      void recordSyncEvent({
+        direction: 'in',
+        path,
+        device: runtime.device || '蓝牙设备',
+        size
+      })
+    },
     log: (text, direction, meta) => {
       runtime.lastLog = text
       pushBtStatus()
       if (text.startsWith('已连接')) {
         runtime.device = text.replace('已连接', '').trim()
       }
-      if (!meta?.path) return
-      if (text.startsWith('已发送')) runtime.sent += 1
-      if (text.startsWith('收到')) runtime.received += 1
-      if (text.startsWith('已发送') || text.startsWith('收到')) {
-        void recordSyncEvent({
-          direction: direction === 'in' ? 'in' : 'out',
-          path: meta.path,
-          device: runtime.device || '蓝牙设备',
-          size: meta.size ?? 0
-        })
-      }
+      void direction
+      void meta
     }
   })
 

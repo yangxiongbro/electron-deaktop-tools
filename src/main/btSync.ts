@@ -46,6 +46,10 @@ export interface BtSyncOptions {
   isCancelled?: (path: string) => boolean
   /** 对方取消了某个文件 */
   onSkip?: (path: string) => void
+  /** 一个文件发送完成 */
+  onSent?: (path: string, size: number) => void
+  /** 一个文件接收完成 */
+  onReceived?: (path: string, size: number) => void
   /** 发出了一个文件请求（用于界面/日志展示） */
   onRequest?: (path: string) => void
   /** 请求超时：对方没有这个文件，或没有响应 */
@@ -422,6 +426,7 @@ export class BtSyncSession {
     this.syncedAt.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
     this.emitProgress(null)
     this.options.log(`已发送 ${path}（${(data.length / 1024).toFixed(0)} KB）`, 'out', { path, size: data.length })
+    this.options.onSent?.(path, data.length)
   }
 
   private async receiveChunk(frame: Frame): Promise<void> {
@@ -483,6 +488,7 @@ export class BtSyncSession {
       this.completed.set(path, { size, at: Date.now() })
       this.emitProgress(null)
       this.options.log(`收到 ${path}（${(size / 1024).toFixed(0)} KB）`, 'in', { path, size })
+      this.options.onReceived?.(path, size)
       await this.refreshLocal(true)
     }
   }
