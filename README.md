@@ -212,6 +212,14 @@ npm run build:unpack
 
 ## 更新记录
 
+### 1.5.14
+
+- 修复：**取消传输后报「处理帧失败：Maximum call stack size exceeded」** ——
+  `emitProgress` 里「已取消就不上报进度」的分支误写成了递归调用自己（`this.emitProgress(null)`），
+  只要有取消动作就会栈溢出。现在改为直接调用 `options.onProgress`，取消后进度正常清空
+- 帧处理异常改为打 `console.error`（带完整堆栈），界面上只显示简短信息
+- 版本号 1.5.14
+
 ### 1.5.13
 
 **文件同步重构：支持 PC ↔ PC**

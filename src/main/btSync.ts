@@ -181,6 +181,8 @@ export class BtSyncSession {
     this.buffer = rest
     for (const frame of frames) {
       void this.handleFrame(frame).catch((error: unknown) => {
+        // 界面只显示简短信息，完整堆栈留给 DevTools 排查
+        console.error('[btSync] 处理帧失败', error)
         this.options.log(`处理帧失败：${(error as Error).message}`, 'in')
       })
     }
@@ -326,11 +328,13 @@ export class BtSyncSession {
 
   /** 取消过的文件不再上报进度，避免取消后界面又冒出一条进度 */
   private emitProgress(info: { path: string; sent: number; total: number; outgoing: boolean } | null): void {
+    // 已取消的文件不再上报进度；注意这里必须直接调用 options.onProgress，
+    // 否则会递归回自己（历史上就因为批量替换把这个函数自己改成了递归，取消后必崩）
     if (info && (this.localSkipped.has(info.path) || this.peerSkipped.has(info.path))) {
-      this.emitProgress(null)
+      this.options.onProgress?.(null)
       return
     }
-    this.emitProgress(info)
+    this.options.onProgress?.(info)
   }
 
   /** 本端取消某个文件的传输：立即通知对方，并让清单带上取消信息 */
