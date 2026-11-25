@@ -534,6 +534,20 @@ export interface SyncTransfer {
   outgoing: boolean
 }
 
+/** PC ↔ PC 同步（WiFi）的连接状态 */
+export interface SyncPeerState {
+  running: boolean
+  host: string
+  port: number
+  connected: boolean
+  lastError: string
+  /** 对端清单里的文件数 */
+  remoteCount: number
+  downloaded: number
+  uploaded: number
+  transfer: SyncTransfer | null
+}
+
 export interface SyncEvent {
   at: number
   /** in = 手机传上来，out = 桌面推下去 */
@@ -797,6 +811,12 @@ export interface DesktopApi {
     cancelTransfer(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>
     /** 仅调试：模拟蓝牙对端请求文件（DSH_BT_SIMULATE=1） */
     debugBtWant(path: string): Promise<boolean>
+    /** 连接另一台电脑（PC ↔ PC，WiFi） */
+    peerStart(input: { host: string; port: number }): Promise<SyncPeerState>
+    peerStop(): Promise<SyncPeerState>
+    peerState(): Promise<SyncPeerState>
+    /** 订阅 PC ↔ PC 状态与进度 */
+    onPeerState(listener: (state: SyncPeerState) => void): () => void
     /** 订阅蓝牙同步状态（含进度），返回取消订阅函数 */
     onBtStatus(listener: (status: BtSyncStatus) => void): () => void
   }

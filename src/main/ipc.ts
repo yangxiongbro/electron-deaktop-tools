@@ -1,3 +1,4 @@
+import { hostname } from 'node:os'
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import { promises as fsp } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -29,6 +30,7 @@ import type {
 import { formatJsonFile } from './jsonFile'
 import { listSerialPorts, receiveOverBluetooth, sendOverBluetooth } from './btSerial'
 import { btStatus, cancelBtTransfer, debugBtWant, startBtSync, stopBtSync } from './btService'
+import { peerSync } from './syncPeer'
 import {
   chooseSyncDir,
   clearSyncEvents,
@@ -512,6 +514,30 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sync:serial-ports', () => listSerialPorts())
 
   ipcMain.handle('sync:bt-status', () => btStatus())
+
+  ipcMain.handle('sync:peer-state', () => peerSync.snapshot())
+
+  // PC ↔ PC 的状态 / 进度变化时推给界面
+  peerSync.onChange(() => {
+    const status = peerSync.snapshot()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      win.webContents.send('sync:peer-state', status)
+    }
+  })
+
+  ipcMain.handle('sync:peer-start', async (_event, input: { host: string; port: number }) => {
+    const state = await syncState()
+    return peerSync.start({
+      host: input.host,
+      port: input.port,
+      dir: state.syncDir,
+      deviceId: `pc-${hostname()}`,
+      maxBytes: Math.max(1, state.settings.maxFileMb ?? 100) * 1024 * 1024
+    })
+  })
+
+  ipcMain.handle('sync:peer-stop', () => peerSync.stop())
 
   // 仅调试：模拟蓝牙对端请求文件（DSH_BT_SIMULATE=1 时才生效）
   ipcMain.handle('sync:bt-debug-want', (_event, path: string) => debugBtWant(path))

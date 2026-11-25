@@ -2,11 +2,25 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Connection, CopyDocument, Delete, FolderOpened, Refresh, VideoPlay, VideoPause } from '@element-plus/icons-vue'
-import type { BtSyncStatus, SerialPortInfo, SyncState } from '@shared/types'
+import type { BtSyncStatus, SerialPortInfo, SyncPeerState, SyncState } from '@shared/types'
 import { formatBytes } from '../utils/format'
 import { copyText } from '../utils/clipboard'
 
 const state = ref<SyncState | null>(null)
+/** PC ↔ PC：连接另一台电脑 */
+const peer = ref<SyncPeerState>({
+  running: false,
+  host: '',
+  port: 45872,
+  connected: false,
+  lastError: '',
+  remoteCount: 0,
+  downloaded: 0,
+  uploaded: 0,
+  transfer: null
+})
+const peerAddress = ref(localStorage.getItem('devtoolbox.sync.peer') ?? '')
+const peerBusy = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const portInput = ref(45872)
@@ -19,6 +33,8 @@ const retryTimers: number[] = []
 let stopTransferPush: (() => void) | undefined
 /** 取消「蓝牙状态」推送订阅 */
 let stopBtStatusPush: (() => void) | undefined
+/** 取消「PC ↔ PC 状态」推送订阅 */
+let stopPeerPush: (() => void) | undefined
 
 const devices = computed(() => state.value?.devices ?? [])
 const events = computed(() => state.value?.events ?? [])
@@ -106,6 +122,38 @@ async function cancelTransfer(): Promise<void> {
     await refreshBtStatus()
   } catch (error) {
     ElMessage.error((error as Error).message)
+  }
+}
+
+/** 连接 / 断开另一台电脑（PC ↔ PC） */
+async function togglePeer(): Promise<void> {
+  peerBusy.value = true
+  try {
+    if (peer.value.running) {
+      peer.value = await window.api.sync.peerStop()
+      ElMessage.success('已断开与对端电脑的连接')
+      return
+    }
+    const address = peerAddress.value.trim()
+    const index = address.lastIndexOf(':')
+    if (index <= 0) {
+      ElMessage.warning('请填写对端地址，例如 192.168.1.8:45872')
+      return
+    }
+    const host = address.slice(0, index)
+    const port = Number(address.slice(index + 1))
+    if (!host || !Number.isFinite(port) || port <= 0) {
+      ElMessage.warning('地址格式不对，应为 IP:端口')
+      return
+    }
+    localStorage.setItem('devtoolbox.sync.peer', address)
+    peer.value = await window.api.sync.peerStart({ host, port })
+    if (!peer.value.connected) ElMessage.error(peer.value.lastError || '连接失败')
+    else ElMessage.success('已连接对端电脑')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    peerBusy.value = false
   }
 }
 
@@ -309,6 +357,15 @@ onMounted(() => {
     btStatus.value = next
   })
 
+  // PC ↔ PC 状态（含进度）
+  stopPeerPush = window.api.sync.onPeerState((next) => {
+    peer.value = next
+  })
+  void window.api.sync.peerState().then((next) => {
+    peer.value = next
+    if (next.host) peerAddress.value = `${next.host}:${next.port}`
+  })
+
   stopTransferPush = window.api.sync.onTransfer((next) => {
     if (!state.value) return
     state.value = { ...state.value, transfer: next }
@@ -356,6 +413,8 @@ onUnmounted(() => {
   stopTransferPush = undefined
   stopBtStatusPush?.()
   stopBtStatusPush = undefined
+  stopPeerPush?.()
+  stopPeerPush = undefined
 })
 </script>
 
@@ -460,6 +519,43 @@ onUnmounted(() => {
             </div>
             <div v-if="missingPort" class="small bt-hint">
               设备已配对但 Windows 没给它建串口：打开「蓝牙和其他设备 → 更多蓝牙选项 → COM 端口 → 添加 → 传入」，加完点「刷新设备」。
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <section v-if="mode === 'wifi'" class="panel sync-side">
+        <div class="panel-header">
+          <span class="panel-title">连接另一台电脑</span>
+          <span class="spacer" />
+          <span class="status-pill" :class="peer.running ? (peer.connected ? 'idle' : 'active') : 'off'">
+            <span class="status-dot"></span>
+            {{ peer.running ? (peer.connected ? '已连接' : '连接中') : '未连接' }}
+          </span>
+        </div>
+        <div class="panel-body sync-info">
+          <el-input v-model="peerAddress" size="small" placeholder="192.168.1.8:45872" clearable />
+          <el-button size="small" :type="peer.running ? 'danger' : 'primary'" :loading="peerBusy" @click="togglePeer">
+            {{ peer.running ? '断开对端电脑' : '连接对端电脑' }}
+          </el-button>
+          <div class="small muted">对端电脑也要打开「文件同步」并点「开启同步」，两台电脑在同一网络下即可互传。</div>
+          <div v-if="peer.running" class="small muted">
+            对端 {{ peer.remoteCount }} 个文件 · 已下载 {{ peer.downloaded }} 个 · 已上传 {{ peer.uploaded }} 个
+          </div>
+          <div v-if="peer.lastError" class="small" style="color: var(--el-color-danger)">{{ peer.lastError }}</div>
+          <template v-if="peer.transfer">
+            <div class="transfer-head">
+              <el-tag size="small" :type="peer.transfer.outgoing ? 'primary' : 'success'" effect="plain">
+                {{ peer.transfer.outgoing ? '上传' : '下载' }}
+              </el-tag>
+              <span class="transfer-path" :title="peer.transfer.path">{{ peer.transfer.path }}</span>
+            </div>
+            <el-progress
+              :percentage="peer.transfer.total ? Math.min(100, Math.round((peer.transfer.sent / peer.transfer.total) * 100)) : 0"
+              :stroke-width="8"
+            />
+            <div class="transfer-meta small muted">
+              <span>{{ formatBytes(peer.transfer.sent) }} / {{ formatBytes(peer.transfer.total) }}</span>
             </div>
           </template>
         </div>

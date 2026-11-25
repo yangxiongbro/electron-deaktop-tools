@@ -29,7 +29,8 @@ import type {
   SerialPortInfo,
   SyncSettings,
   SyncState,
-  SyncTransfer
+  SyncTransfer,
+  SyncPeerState
 } from '@shared/types'
 
 const api: DesktopApi = {
@@ -118,6 +119,15 @@ const api: DesktopApi = {
     btStart: (portName: string) => ipcRenderer.invoke('sync:bt-start', portName) as Promise<BtSyncStatus>,
     btStop: () => ipcRenderer.invoke('sync:bt-stop') as Promise<BtSyncStatus>,
     btStatus: () => ipcRenderer.invoke('sync:bt-status') as Promise<BtSyncStatus>,
+    /** PC ↔ PC：连接另一台电脑 */
+    peerStart: (input: { host: string; port: number }) => ipcRenderer.invoke('sync:peer-start', input) as Promise<SyncPeerState>,
+    peerStop: () => ipcRenderer.invoke('sync:peer-stop') as Promise<SyncPeerState>,
+    peerState: () => ipcRenderer.invoke('sync:peer-state') as Promise<SyncPeerState>,
+    onPeerState: (listener: (state: SyncPeerState) => void) => {
+      const handler = (_event: unknown, value: SyncPeerState): void => listener(value)
+      ipcRenderer.on('sync:peer-state', handler)
+      return () => ipcRenderer.removeListener('sync:peer-state', handler)
+    },
     /** 仅调试：模拟蓝牙对端请求文件 */
     debugBtWant: (path: string) => ipcRenderer.invoke('sync:bt-debug-want', path) as Promise<boolean>,
     /** 取消正在传输的任务 */
