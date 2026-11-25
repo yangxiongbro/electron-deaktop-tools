@@ -123,6 +123,8 @@ const api: DesktopApi = {
     peerStart: (input: { host: string; port: number }) => ipcRenderer.invoke('sync:peer-start', input) as Promise<SyncPeerState>,
     peerStop: () => ipcRenderer.invoke('sync:peer-stop') as Promise<SyncPeerState>,
     peerState: () => ipcRenderer.invoke('sync:peer-state') as Promise<SyncPeerState>,
+    /** 取消当前的 PC ↔ PC 传输 */
+    peerCancel: () => ipcRenderer.invoke('sync:cancel-transfer') as Promise<{ ok: boolean; kind: 'wifi' | 'bt' | 'peer' | '' }>,
     onPeerState: (listener: (state: SyncPeerState) => void) => {
       const handler = (_event: unknown, value: SyncPeerState): void => listener(value)
       ipcRenderer.on('sync:peer-state', handler)

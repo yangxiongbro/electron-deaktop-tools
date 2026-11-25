@@ -504,6 +504,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sync:cancel-transfer', () => {
     if (cancelTransfer()) return { ok: true, kind: 'wifi' as const }
     if (cancelBtTransfer()) return { ok: true, kind: 'bt' as const }
+    if (peerSync.cancel()) return { ok: true, kind: 'peer' as const }
     return { ok: false, kind: '' as const }
   })
 

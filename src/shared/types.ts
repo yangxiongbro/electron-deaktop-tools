@@ -808,12 +808,14 @@ export interface DesktopApi {
     /** 订阅传输进度变化，返回取消订阅函数 */
     onTransfer(listener: (transfer: SyncTransfer | null) => void): () => void
     /** 取消正在传输的任务（WiFi 或蓝牙） */
-    cancelTransfer(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | '' }>
+    cancelTransfer(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | 'peer' | '' }>
     /** 仅调试：模拟蓝牙对端请求文件（DSH_BT_SIMULATE=1） */
     debugBtWant(path: string): Promise<boolean>
     /** 连接另一台电脑（PC ↔ PC，WiFi） */
     peerStart(input: { host: string; port: number }): Promise<SyncPeerState>
     peerStop(): Promise<SyncPeerState>
+    /** 取消当前的 PC ↔ PC 传输 */
+    peerCancel(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | 'peer' | '' }>
     peerState(): Promise<SyncPeerState>
     /** 订阅 PC ↔ PC 状态与进度 */
     onPeerState(listener: (state: SyncPeerState) => void): () => void

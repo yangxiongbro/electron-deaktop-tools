@@ -157,6 +157,17 @@ async function togglePeer(): Promise<void> {
   }
 }
 
+/** 取消当前的 PC ↔ PC 传输 */
+async function cancelPeer(): Promise<void> {
+  const result = await window.api.sync.peerCancel()
+  if (result.ok) {
+    peer.value = await window.api.sync.peerState()
+    ElMessage.success('已取消当前传输')
+  } else {
+    ElMessage.info('当前没有正在传输的文件')
+  }
+}
+
 async function refreshAll(): Promise<void> {
   await refresh()
   if (mode.value === 'bt') await refreshPorts()
@@ -556,6 +567,7 @@ onUnmounted(() => {
             />
             <div class="transfer-meta small muted">
               <span>{{ formatBytes(peer.transfer.sent) }} / {{ formatBytes(peer.transfer.total) }}</span>
+              <el-button size="small" type="danger" plain @click="cancelPeer">取消</el-button>
             </div>
           </template>
         </div>
