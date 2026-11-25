@@ -57,6 +57,11 @@ export class CancelRegistry {
     return this.entries.get(path)
   }
 
+  /** 解除某个文件的取消（文件内容变了，应该重新允许同步） */
+  release(path: string): void {
+    this.entries.delete(path)
+  }
+
   /** 会话结束 / 重新开始同步时清空 */
   clear(): void {
     this.entries.clear()

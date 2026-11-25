@@ -131,6 +131,8 @@ export class BtSyncSession {
   /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
   private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
+  /** 每个路径上一次见到的远端指纹（用于判断「文件变了」从而解除取消/超时） */
+  private readonly seenFingerprint = new Map<string, string>()
   /** 请求超时的文件：本次会话不再自动重试（不等于「取消」，不影响进度/发送判定） */
   private readonly timeoutPaths = new Set<string>()
   /** 取消登记表：本端 / 对方的取消都记在这里，是取消状态的唯一来源 */
@@ -261,6 +263,29 @@ export class BtSyncSession {
         break
       }
       case 'manifest': {
+        // 文件内容变了（指纹不同）就解除之前的「取消 / 超时」，否则新版本永远传不过来
+        const incoming = frame.header.files
+        if (Array.isArray(incoming)) {
+          for (const item of incoming) {
+            const path = String((item as { p?: unknown })?.p ?? '')
+            if (!path) continue
+            const size = Number((item as { s?: unknown })?.s ?? 0)
+            const mtime = Number((item as { m?: unknown })?.m ?? 0)
+            const fp = `${size}:${mtime}`
+            const previous = this.seenFingerprint.get(path)
+            if (previous && previous !== fp) {
+              if (this.timeoutPaths.delete(path)) {
+                this.options.log(`${path} 已更新，重新允许同步`, 'in')
+              }
+              const entry = this.cancelled.get(path)
+              if (entry) {
+                this.cancelled.release(path)
+                this.options.log(`${path} 已更新，取消状态已解除`, 'in')
+              }
+            }
+            this.seenFingerprint.set(path, fp)
+          }
+        }
         // 对方清单里带的「已取消」列表：即使 skip 帧丢了也能对齐
         const cancelled = frame.header.c
         if (Array.isArray(cancelled)) {
