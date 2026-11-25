@@ -109,6 +109,9 @@ export function registerWifiCancel(): void {
 
 /** 取消时在「最近同步」里留一条记录，用户能看到是主动取消的 */
 function logEventOfCancel(info: SyncTransfer): void {
+  if (alreadyLoggedCancel.has(info.path)) return
+  alreadyLoggedCancel.add(info.path)
+  setTimeout(() => alreadyLoggedCancel.delete(info.path), 10000)
   void (async () => {
     try {
       const store = await loadStore()
@@ -127,6 +130,8 @@ function logEventOfCancel(info: SyncTransfer): void {
 let lastManifest: ManifestEntry[] = []
 /** 用户取消过传输的文件：本次同步内不再提供 / 接收，重新开始同步会清空 */
 const cancelledPaths = new Set<string>()
+/** 已经记过「已取消」的文件：避免取消按钮 + 连接中断各记一条 */
+const alreadyLoggedCancel = new Set<string>()
 /**
  * 开启同步那一刻的文件指纹（path → size:mtime）。
  * 只有「开启同步之后被新增 / 改动过」的文件才需要同步，历史文件不再全量传输。
@@ -445,8 +450,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           device.lastSyncAt = Date.now()
           logEvent(store, { direction: 'out', path: filePath, device: device.name, size: stat.size })
           void persist()
-        } else {
-          // 对端中途断开 = 对方取消了接收
+        } else if (!alreadyLoggedCancel.has(filePath)) {
+          // 对端中途断开 = 对方取消了接收（本端主动取消的那种已经记过了，不再重复）
           cancelledPaths.add(filePath)
           transferHub.markCancelled(filePath, 'peer')
           logEvent(store, {
@@ -477,6 +482,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return
     }
     const uploadPath = relativePath
+    if (cancelledPaths.has(uploadPath)) {
+      // 这个文件本端已经取消过：告诉手机别再传了
+      sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+      return
+    }
     const ip = clientIp(req)
     const device = touchDevice(store, { id: url.searchParams.get('device') ?? ip }, ip, store.settings.port)
     let received = 0
@@ -510,13 +520,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       setTransfer(null)
       cancelledPaths.add(uploadPath)
       transferHub.markCancelled(uploadPath, 'peer')
-      logEvent(store, {
-        direction: 'in',
-        path: uploadPath,
-        device: `${device.name}（对方取消）`,
-        size: received
-      })
-      void persist()
+      if (!alreadyLoggedCancel.has(uploadPath)) {
+        logEvent(store, {
+          direction: 'in',
+          path: uploadPath,
+          device: `${device.name}（对方取消）`,
+          size: received
+        })
+        void persist()
+      }
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: (error as Error).message })
     }
     return
@@ -633,6 +645,7 @@ export async function saveSyncSettings(patch: Partial<SyncSettings>): Promise<Sy
 
 export async function startSync(): Promise<SyncState> {
   clearCancelledPaths()
+  alreadyLoggedCancel.clear()
   // 开启同步的这一刻打基线：此前的文件视为「已经同步过」
   await captureBaseline()
   return saveSyncSettings({ enabled: true })
