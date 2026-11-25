@@ -168,16 +168,18 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
         size: 0
       })
     },
-    onSkip: (path) => {
-      // 对方取消了：本地进度也要立刻清掉，否则界面停在旧百分比
+    onSkip: (path, reason) => {
+      // 对方取消 / 对方没有该文件：清进度并按原因记录
       runtime.transfer = null
-      runtime.lastLog = `对方取消了 ${path}`
+      runtime.lastLog = reason === 'missing' ? `对方没有该文件：${path}` : `对方取消了 ${path}`
       pushBtStatus(true)
-      // 也记一条「最近同步」，界面上能看出来是对方取消的
       void recordSyncEvent({
         direction: 'in',
         path,
-        device: `${runtime.device || '蓝牙设备'}（对方取消）`,
+        device:
+          reason === 'missing'
+            ? `${runtime.device || '蓝牙设备'}（对方没有该文件）`
+            : `${runtime.device || '蓝牙设备'}（对方取消）`,
         size: 0
       })
     },
@@ -244,18 +246,23 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
 
 /** 取消正在进行的蓝牙传输（不断开连接） */
 export function cancelBtTransfer(): boolean {
-  const current = runtime.transfer
+  const session = runtime.session
+  // 以会话记录的当前传输为准（进度回调会更新它），拿不到再退回本地的 runtime.transfer
+  const current = session?.currentTransfer() ?? runtime.transfer
   if (!current) return false
-  runtime.session?.cancelTransfer(current.path)
+  const isNew = session ? session.cancelTransfer(current.path) : false
   runtime.transfer = null
   pushBtStatus(true)
-  // 本端取消也要在「最近同步」里留一条，便于对照两端日志
-  void recordSyncEvent({
-    direction: current.outgoing ? 'out' : 'in',
-    path: current.path,
-    device: `${runtime.device || '蓝牙设备'}（已取消）`,
-    size: Math.round(current.sent)
-  })
+  runtime.lastLog = `已取消：${current.path}`
+  if (isNew) {
+    // 本端取消写一条记录，便于对照两端日志
+    void recordSyncEvent({
+      direction: current.outgoing ? 'out' : 'in',
+      path: current.path,
+      device: `${runtime.device || '蓝牙设备'}（已取消）`,
+      size: Math.round(current.sent)
+    })
+  }
   return true
 }
 

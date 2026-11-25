@@ -1,6 +1,7 @@
 import { promises as fsp } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { manifestVersion, scanSyncFolder, type ManifestEntry } from './syncFs'
+import { CancelRegistry } from './btCancel'
 
 /* ------------------------------------------------------------------ */
 /* 蓝牙自动同步：和 WiFi 同步一样，盯着同步文件夹，有变化就互发文件        */
@@ -45,7 +46,7 @@ export interface BtSyncOptions {
   /** 本端是否已取消这个文件（取消后不再发送） */
   isCancelled?: (path: string) => boolean
   /** 对方取消了某个文件 */
-  onSkip?: (path: string) => void
+  onSkip?: (path: string, reason?: 'missing') => void
   /** 一个文件发送完成 */
   onSent?: (path: string, size: number) => void
   /** 一个文件接收完成 */
@@ -125,15 +126,11 @@ export class BtSyncSession {
   private frameQueue: Promise<void> = Promise.resolve()
   private closed = false
   /** 正在发送的文件：避免同一条 want 触发并发发送 */
-  /** 上一次为某个路径记「对方取消」日志的时间，用来去重（2 秒内只记一条） */
-  private readonly skipLogAt = new Map<string, number>()
   /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
   private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
-  /** 本端取消过的文件：写进清单，确保对方一定知道（skip 帧丢了也能对齐） */
-  private readonly localSkipped = new Set<string>()
-  /** 对方明确取消过的文件：本端立刻停发，且不再给它发 */
-  private readonly peerSkipped = new Set<string>()
+  /** 取消登记表：本端 / 对方的取消都记在这里，是取消状态的唯一来源 */
+  private readonly cancelled = new CancelRegistry()
   /** 已发出、还没收完的 want：path → 时间戳（防止反复请求同一个文件） */
   private requested = new Map<string, number>()
   /** 收到过的文件：path → { 应上报的 mtime, 落盘后的 mtime } */
@@ -218,7 +215,7 @@ export class BtSyncSession {
       t: 'manifest',
       v: this.localVersion,
       files: this.localFiles.map((file) => ({ p: file.path, s: file.size, m: file.mtime })),
-      c: [...this.localSkipped],
+      c: this.cancelled.localPaths(),
       // 已同步指纹：对方据此跳过重复传输
       s: [...this.syncedAt.entries()].map(([path, stamp]) => [path, stamp])
     })
@@ -294,7 +291,7 @@ export class BtSyncSession {
       case 'want': {
         const path = String(frame.header.p ?? '')
         if (!path) break
-        if (this.peerSkipped.has(path) || this.localSkipped.has(path) || this.options.isCancelled?.(path)) {
+        if (this.cancelled.has(path) || this.options.isCancelled?.(path)) {
           // 这个文件在本端被取消过：告诉对方别再要
           this.send({ t: 'skip', p: path })
           break
@@ -346,39 +343,51 @@ export class BtSyncSession {
     }
   }
 
-  /** 对方取消：清进度 + 记一条日志（2 秒内去重，重复帧不会写两条） */
-  private notePeerSkip(path: string): void {
-    this.peerSkipped.add(path)
+  /** 对方取消：登记 + 丢掉半截数据 + 清进度 + 记一条日志（重复帧不会写两条） */
+  private notePeerSkip(path: string, reason?: 'missing'): void {
+    const isNew = this.cancelled.mark(path, 'peer', reason)
     this.incoming.delete(path)
+    this.requested.delete(path)
     this.emitProgress(null)
-    const last = this.skipLogAt.get(path) ?? 0
-    if (Date.now() - last < 2000) return
-    this.skipLogAt.set(path, Date.now())
-    this.options.onSkip?.(path)
+    if (isNew) this.options.onSkip?.(path, reason)
   }
 
   /** 取消过的文件不再上报进度，避免取消后界面又冒出一条进度 */
   private emitProgress(info: { path: string; sent: number; total: number; outgoing: boolean } | null): void {
     // 已取消的文件不再上报进度；注意这里必须直接调用 options.onProgress，
     // 否则会递归回自己（历史上就因为批量替换把这个函数自己改成了递归，取消后必崩）
-    if (info && (this.localSkipped.has(info.path) || this.peerSkipped.has(info.path))) {
+    if (info && this.cancelled.has(info.path)) {
       this.options.onProgress?.(null)
       return
     }
+    this.state_transfer = info
     this.options.onProgress?.(info)
   }
 
-  /** 本端取消某个文件的传输：立即通知对方，并让清单带上取消信息 */
-  cancelTransfer(path: string): void {
-    if (!path) return
-    const had = this.localSkipped.has(path)
-    this.localSkipped.add(path)
+  /**
+   * 本端取消某个文件的传输。
+   * 语义统一在这里：登记 → 丢掉本端半截数据 → 通知对方（skip 帧 + 清单 c 字段）。
+   * 返回 true 表示这是新取消（用于写「最近同步」记录，避免重复记录）。
+   */
+  cancelTransfer(path: string): boolean {
+    if (!path) return false
+    const isNew = this.cancelled.mark(path, 'local')
     this.incoming.delete(path)
-    if (!had) {
-      this.send({ t: 'skip', p: path })
-      this.sendManifest()
-    }
+    this.requested.delete(path)
+    this.emitProgress(null)
+    if (!isNew) return false
+    this.send({ t: 'skip', p: path })
+    this.sendManifest()
+    return true
   }
+
+  /** 当前正在传输的文件（取消按钮用；没有传输时返回 null） */
+  currentTransfer(): { path: string; sent: number; total: number; outgoing: boolean } | null {
+    return this.state_transfer
+  }
+
+  /** 供 onProgress 记录当前传输（取消时要立刻知道取消哪个文件） */
+  private state_transfer: { path: string; sent: number; total: number; outgoing: boolean } | null = null
 
   /** 请求超过 20 秒还没收到 → 认为对方没有这个文件，记一条并停止重试 */
   private checkRequestTimeouts(): void {
@@ -387,7 +396,7 @@ export class BtSyncSession {
       if (now - at < 20000) continue
       if (this.incoming.has(path)) continue
       this.requested.delete(path)
-      this.peerSkipped.add(path)
+      this.cancelled.mark(path, 'peer')
       this.options.log(`请求超时：${path}（对方没有这个文件或没响应）`, 'in')
       this.options.onRequestTimeout?.(path)
     }
@@ -413,17 +422,13 @@ export class BtSyncSession {
       const writing = this.send({ t: 'file', p: path, n: data.length, o: offset, m: Math.round(stat.mtimeMs) }, chunk)
       if (writing) await writing
       this.options.onProgress?.({ path, sent: offset + chunk.length, total: data.length, outgoing: true })
-      if (this.peerSkipped.has(path)) {
+      if (this.cancelled.has(path)) {
         // 对方取消了：停发并清状态（它自己会清缓冲）
         this.emitProgress(null)
         this.options.log(`对方取消了 ${path}，已停止发送`, 'out', { path, size: offset })
         return
       }
-      if (this.localSkipped.has(path)) {
-        // 本端取消了（cancelTransfer 已经把 skip 发出去并记了日志）
-        this.emitProgress(null)
-        return
-      }
+
     }
     if (data.length === 0) this.send({ t: 'file', p: path, n: 0, o: 0, m: Math.round(stat.mtimeMs) })
     // 发完把它记进基线，避免每轮清单都把它当「变化」再发给对方
@@ -436,7 +441,7 @@ export class BtSyncSession {
 
   private async receiveChunk(frame: Frame): Promise<void> {
     const path = String(frame.header.p ?? '')
-    if (path && (this.peerSkipped.has(path) || this.localSkipped.has(path))) {
+    if (path && (this.cancelled.has(path))) {
       this.incoming.delete(path)
       this.emitProgress(null)
       return
