@@ -46,6 +46,10 @@ export interface BtSyncOptions {
   isCancelled?: (path: string) => boolean
   /** 对方取消了某个文件 */
   onSkip?: (path: string) => void
+  /** 发出了一个文件请求（用于界面/日志展示） */
+  onRequest?: (path: string) => void
+  /** 请求超时：对方没有这个文件，或没有响应 */
+  onRequestTimeout?: (path: string) => void
 }
 
 const CHUNK_SIZE = 32 * 1024
@@ -155,6 +159,7 @@ export class BtSyncSession {
       ticks += 1
       // 约每 10 秒强制发一次清单：版本号没变化时也能让对方发现新增文件
       void this.refreshLocal(ticks % 7 === 0)
+      this.checkRequestTimeouts()
     }, MANIFEST_INTERVAL_MS)
   }
 
@@ -327,6 +332,8 @@ export class BtSyncSession {
       this.requested.set(path, now)
       this.send({ t: 'want', p: path })
       this.options.log(`请求 ${path}`, 'out')
+      // 记一条「请求」日志，超时后会补一条失败记录，避免用户看不到任何痕迹
+      this.options.onRequest?.(path)
     }
   }
 
@@ -361,6 +368,19 @@ export class BtSyncSession {
     if (!had) {
       this.send({ t: 'skip', p: path })
       this.sendManifest()
+    }
+  }
+
+  /** 请求超过 20 秒还没收到 → 认为对方没有这个文件，记一条并停止重试 */
+  private checkRequestTimeouts(): void {
+    const now = Date.now()
+    for (const [path, at] of [...this.requested]) {
+      if (now - at < 20000) continue
+      if (this.incoming.has(path)) continue
+      this.requested.delete(path)
+      this.peerSkipped.add(path)
+      this.options.log(`请求超时：${path}（对方没有这个文件或没响应）`, 'in')
+      this.options.onRequestTimeout?.(path)
     }
   }
 

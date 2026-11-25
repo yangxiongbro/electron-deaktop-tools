@@ -158,6 +158,16 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
       pushBtStatus()
     },
     isCancelled: (path) => isCancelledPath(path),
+    onRequestTimeout: (path) => {
+      runtime.lastLog = `请求超时：${path}`
+      pushBtStatus(true)
+      void recordSyncEvent({
+        direction: 'in',
+        path,
+        device: `${runtime.device || '蓝牙设备'}（对方没有该文件）`,
+        size: 0
+      })
+    },
     onSkip: (path) => {
       // 对方取消了：本地进度也要立刻清掉，否则界面停在旧百分比
       runtime.transfer = null
