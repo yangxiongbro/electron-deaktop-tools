@@ -66,7 +66,7 @@ const receivedCount = computed(() => events.value.filter((item) => item.directio
 
 /** 传输状态文案：未开启 / 空闲 / 正在传输 */
 const transferStatusText = computed(() => {
-  if (activeTransfer.value) return activeTransfer.value.outgoing ? '正在下发' : '正在上传'
+  if (activeTransfer.value) return activeTransfer.value.outgoing ? '正在发送' : '正在接收'
   const running = mode.value === 'wifi' ? Boolean(state.value?.running) : Boolean(btStatus.value.running)
   return running ? '已连接（空闲）' : '未开启'
 })
@@ -498,7 +498,7 @@ onUnmounted(() => {
               </el-tooltip>
             </div>
             <div class="small muted tips">
-              <div>· 手机 → 电脑：把文件放进手机端同步文件夹，会自动上传到这里。</div>
+              <div>· 手机 → 电脑：把文件放进手机端同步文件夹，会自动发送到这里。</div>
               <div>· 电脑 → 手机：往这个文件夹里放文件 / 改文件，手机会按清单变化自动拉取。</div>
               <div>· 所有类型的文件都会同步，超过上限的会跳过。</div>
             </div>
@@ -551,13 +551,13 @@ onUnmounted(() => {
           </el-button>
           <div class="small muted">对端电脑也要打开「文件同步」并点「开启同步」，两台电脑在同一网络下即可互传。</div>
           <div v-if="peer.running" class="small muted">
-            对端 {{ peer.remoteCount }} 个文件 · 已下载 {{ peer.downloaded }} 个 · 已上传 {{ peer.uploaded }} 个
+            对端 {{ peer.remoteCount }} 个文件 · 已接收 {{ peer.downloaded }} 个 · 已发送 {{ peer.uploaded }} 个
           </div>
           <div v-if="peer.lastError" class="small" style="color: var(--el-color-danger)">{{ peer.lastError }}</div>
           <template v-if="peer.transfer">
             <div class="transfer-head">
               <el-tag size="small" :type="peer.transfer.outgoing ? 'primary' : 'success'" effect="plain">
-                {{ peer.transfer.outgoing ? '上传' : '下载' }}
+                {{ peer.transfer.outgoing ? '发送' : '接收' }}
               </el-tag>
               <span class="transfer-path" :title="peer.transfer.path">{{ peer.transfer.path }}</span>
             </div>
@@ -592,7 +592,7 @@ onUnmounted(() => {
             <template v-if="activeTransfer">
               <div class="transfer-head">
                 <el-tag size="small" :type="activeTransfer.outgoing ? 'primary' : 'success'" effect="plain">
-                  {{ activeTransfer.outgoing ? '下发' : '上传' }}
+                  {{ activeTransfer.outgoing ? '发送' : '接收' }}
                 </el-tag>
                 <span class="transfer-path" :title="activeTransfer.path">{{ activeTransfer.path }}</span>
                 <el-button size="small" type="danger" plain @click="cancelTransfer">取消</el-button>
@@ -605,12 +605,12 @@ onUnmounted(() => {
               <div class="transfer-meta small muted">
                 <span>{{ formatBytes(activeTransfer.sent) }} / {{ formatBytes(activeTransfer.total) }}</span>
                 <span v-if="transferSpeed">{{ transferSpeed }}</span>
-                <span>本次已下发 {{ sentCount }} 个 · 已上传 {{ receivedCount }} 个</span>
+                <span>本次已发送 {{ sentCount }} 个 · 已接收 {{ receivedCount }} 个</span>
               </div>
             </template>
             <div v-else class="transfer-empty small muted">
               <span>{{ idleTransferHint }}</span>
-              <span>本次已下发 {{ sentCount }} 个 · 已上传 {{ receivedCount }} 个</span>
+              <span>本次已发送 {{ sentCount }} 个 · 已接收 {{ receivedCount }} 个</span>
             </div>
           </div>
           <template v-if="mode === 'wifi'">
@@ -674,7 +674,7 @@ onUnmounted(() => {
           <div v-if="!events.length" class="small muted event-empty">还没有同步记录</div>
           <div v-for="(event, index) in events" :key="`${event.at}-${index}`" class="event-row">
             <el-tag size="small" :type="event.direction === 'in' ? 'success' : 'primary'" effect="plain">
-              {{ event.direction === 'in' ? '上传' : '下发' }}
+              {{ event.direction === 'in' ? '接收' : '发送' }}
             </el-tag>
             <div class="event-main">
               <div class="event-path mono">{{ event.path }}</div>

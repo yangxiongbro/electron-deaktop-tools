@@ -431,12 +431,36 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         sent += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
         setTransfer({ path: filePath, sent, total: stat.size, outgoing: true })
       })
-      const clear = (): void => {
+      const ip = clientIp(req)
+      const device = touchDevice(store, { id: url.searchParams.get('device') ?? ip }, ip, store.settings.port)
+      let finished = false
+      const finish = (): void => {
+        if (finished) return
+        finished = true
         transferAbort = null
         setTransfer(null)
+        if (sent >= stat.size) {
+          // 完整发完：记一条「发送」记录（之前漏了，手机上收到了电脑却没有记录）
+          device.filesSynced += 1
+          device.lastSyncAt = Date.now()
+          logEvent(store, { direction: 'out', path: filePath, device: device.name, size: stat.size })
+          void persist()
+        } else {
+          // 对端中途断开 = 对方取消了接收
+          cancelledPaths.add(filePath)
+          transferHub.markCancelled(filePath, 'peer')
+          logEvent(store, {
+            direction: 'out',
+            path: filePath,
+            device: `${device.name}（对方取消）`,
+            size: sent
+          })
+          void persist()
+        }
       }
-      res.on('close', clear)
-      stream.on('error', clear)
+      res.on('close', finish)
+      res.on('finish', finish)
+      stream.on('error', finish)
       stream.pipe(res)
     } catch {
       sendJson(res, 404, { ok: false, error: '文件不存在或已被删除' })
@@ -452,12 +476,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, { ok: false, error: '非法路径' })
       return
     }
+    const uploadPath = relativePath
+    const ip = clientIp(req)
+    const device = touchDevice(store, { id: url.searchParams.get('device') ?? ip }, ip, store.settings.port)
+    let received = 0
     try {
       await fsp.mkdir(dirname(target), { recursive: true })
-      const uploadPath = relativePath
       transferAbort = () => req.destroy()
       setTransfer({ path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false })
       const body = await readBody(req, undefined, (sent, total) => {
+        received = sent
         setTransfer({ path: uploadPath, sent, total: total || sent, outgoing: false })
       })
       transferAbort = null
@@ -468,8 +496,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         stream.on('close', () => resolve())
         stream.on('error', reject)
       })
-      const ip = clientIp(req)
-      const device = touchDevice(store, { id: url.searchParams.get('device') ?? ip }, ip, store.settings.port)
       device.filesSynced += 1
       device.lastSyncAt = Date.now()
       logEvent(store, { direction: 'in', path: relativePath, device: device.name, size: body.length })
@@ -479,7 +505,19 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       refreshManifest().catch(() => undefined)
       sendJson(res, 200, { ok: true, size: body.length })
     } catch (error) {
-      sendJson(res, 500, { ok: false, error: (error as Error).message })
+      // 对端中途断开（取消上传）：清掉传输状态，否则界面会一直停在取消时的进度
+      transferAbort = null
+      setTransfer(null)
+      cancelledPaths.add(uploadPath)
+      transferHub.markCancelled(uploadPath, 'peer')
+      logEvent(store, {
+        direction: 'in',
+        path: uploadPath,
+        device: `${device.name}（对方取消）`,
+        size: received
+      })
+      void persist()
+      if (!res.headersSent) sendJson(res, 500, { ok: false, error: (error as Error).message })
     }
     return
   }
