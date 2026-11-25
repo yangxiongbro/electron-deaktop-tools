@@ -61,6 +61,8 @@ const CHUNK_SIZE = 32 * 1024
 
 
 const MANIFEST_INTERVAL_MS = 1500
+/** 请求后多久没任何分块算超时（蓝牙慢，给足时间） */
+const REQUEST_TIMEOUT_MS = 120000
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 
 interface Frame {
@@ -129,6 +131,8 @@ export class BtSyncSession {
   /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
   private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
+  /** 请求超时的文件：本次会话不再自动重试（不等于「取消」，不影响进度/发送判定） */
+  private readonly timeoutPaths = new Set<string>()
   /** 取消登记表：本端 / 对方的取消都记在这里，是取消状态的唯一来源 */
   private readonly cancelled = new CancelRegistry()
   /** 已发出、还没收完的 want：path → 时间戳（防止反复请求同一个文件） */
@@ -153,6 +157,11 @@ export class BtSyncSession {
     // 开启同步时先记下当前目录：这些文件视为已同步，不再互相传
     const initial = await scanSyncFolder(this.options.dir, this.options.maxFileBytes ?? DEFAULT_MAX_BYTES)
     this.baseline = new Map(initial.map((file) => [file.path, `${file.size}:${file.mtime}`]))
+    // 基线之外的文件（本次开始之后新增 / 改动）才会参与同步
+    this.syncedAt.clear()
+    this.timeoutPaths.clear()
+    this.cancelled.clear()
+    this.options.log(`本次同步只传输开始之后变化的文件（当前文件夹已有 ${initial.length} 个，作为基线）`, 'out')
     await this.refreshLocal(true)
     this.send({ t: 'hello', name: this.options.deviceName })
     this.sendManifest()
@@ -331,6 +340,7 @@ export class BtSyncSession {
       // 刚收/发过同一个文件（指纹一致）→ 认定已同步，跳过，避免来回重传
       const synced = this.syncedAt.get(path)
       if (synced && synced === `${remote.size}:${remote.mtime}`) continue
+      if (this.timeoutPaths.has(path)) continue
       // 自己这份更新，等对方来拉，避免互相覆盖
       if (mine && mine.mtime > remote.mtime) continue
       const pendingAt = this.requested.get(path)
@@ -393,11 +403,15 @@ export class BtSyncSession {
   private checkRequestTimeouts(): void {
     const now = Date.now()
     for (const [path, at] of [...this.requested]) {
-      if (now - at < 20000) continue
-      if (this.incoming.has(path)) continue
+      // 蓝牙速度慢，读文件也要时间：给 2 分钟；只要收到过分块就重新计时
+      if (now - at < REQUEST_TIMEOUT_MS) continue
+      if (this.incoming.has(path)) {
+        this.requested.set(path, now)
+        continue
+      }
       this.requested.delete(path)
-      this.cancelled.mark(path, 'peer')
-      this.options.log(`请求超时：${path}（对方没有这个文件或没响应）`, 'in')
+      this.timeoutPaths.add(path)
+      this.options.log(`请求超时：${path}（对方没有这个文件或响应太慢）`, 'in')
       this.options.onRequestTimeout?.(path)
     }
   }
@@ -448,6 +462,11 @@ export class BtSyncSession {
     }
     const size = Number(frame.header.n ?? 0)
     const offset = Number(frame.header.o ?? 0)
+    // 收到真实数据：清掉超时标记并重新计时，避免「刚开始慢」被误判成没有这个文件
+    if (path) {
+      this.timeoutPaths.delete(path)
+      if (this.requested.has(path)) this.requested.set(path, Date.now())
+    }
     if (!path || size < 0 || offset < 0) return
     const maxBytes = this.options.maxFileBytes ?? DEFAULT_MAX_BYTES
     if (size > maxBytes) {
