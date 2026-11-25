@@ -121,6 +121,8 @@ export class BtSyncSession {
   private remoteFiles = new Map<string, ManifestEntry>()
   /** 正在接收的文件：p → { size, received, temp } */
   private incoming = new Map<string, { size: number; received: number; temp: string }>()
+  /** 帧处理队列：保证按顺序、串行处理（分块写文件必须串行） */
+  private frameQueue: Promise<void> = Promise.resolve()
   private closed = false
   /** 正在发送的文件：避免同一条 want 触发并发发送 */
   /** 上一次为某个路径记「对方取消」日志的时间，用来去重（2 秒内只记一条） */
@@ -191,11 +193,14 @@ export class BtSyncSession {
     const { frames, rest } = decodeBtFrames(this.buffer)
     this.buffer = rest
     for (const frame of frames) {
-      void this.handleFrame(frame).catch((error: unknown) => {
-        // 界面只显示简短信息，完整堆栈留给 DevTools 排查
-        console.error('[btSync] 处理帧失败', error)
-        this.options.log(`处理帧失败：${(error as Error).message}`, 'in')
-      })
+      // 必须一帧一帧处理：分块帧是增量写文件的，并发处理会互相踩 received
+      this.frameQueue = this.frameQueue.then(() =>
+        this.handleFrame(frame).catch((error: unknown) => {
+          // 界面只显示简短信息，完整堆栈留给 DevTools 排查
+          console.error('[btSync] 处理帧失败', error)
+          this.options.log(`处理帧失败：${(error as Error).message}`, 'in')
+        })
+      )
     }
   }
 
@@ -446,17 +451,32 @@ export class BtSyncSession {
     }
 
     const target = join(this.options.dir, path)
+    // 刚刚完整收过这个文件（30 秒内、大小相同）：忽略重复推来的数据，
+    // 否则「进度回到 1%」时新的一轮会把已经写好的完整文件覆盖成残缺文件
+    const done = this.completed.get(path)
+    if (done && done.size === size && Date.now() - done.at < 30000) return
+
     let state = this.incoming.get(path)
     if (!state) {
       state = { size, received: 0, temp: `${target}.btpart` }
       this.incoming.set(path, state)
       await fsp.mkdir(dirname(target), { recursive: true }).catch(() => undefined)
       await fsp.writeFile(state.temp, Buffer.alloc(0)).catch(() => undefined)
+    } else if (state.size !== size) {
+      // 同一路径但总大小变了：旧的是残缺数据，直接丢掉重来
+      this.incoming.delete(path)
+      await fsp.rm(state.temp, { force: true }).catch(() => undefined)
+      state = { size, received: 0, temp: `${target}.btpart` }
+      this.incoming.set(path, state)
+      await fsp.appendFile(state.temp, Buffer.alloc(0)).catch(() => undefined)
     }
     if (offset !== state.received) {
-      // 乱序（正常不会发生）：重置
-      state.received = 0
-      await fsp.writeFile(state.temp, Buffer.alloc(0)).catch(() => undefined)
+      // 乱序（正常不会发生）：整段作废，不能在半截数据上继续拼，否则会落一个坏文件
+      this.incoming.delete(path)
+      await fsp.rm(state.temp, { force: true }).catch(() => undefined)
+      this.options.log(`${path} 分块乱序，已丢弃本次接收`, 'in')
+      this.emitProgress(null)
+      return
     }
     await fsp.appendFile(state.temp, frame.payload)
     state.received += frame.payload.length
@@ -464,6 +484,17 @@ export class BtSyncSession {
     if (state.received >= size) {
       this.incoming.delete(path)
       this.requested.delete(path)
+      // 落盘前校验长度：不足就丢弃，绝不把残缺文件改成正式文件名
+      const tmpStat = await fsp.stat(state.temp).catch(() => null)
+      if (!tmpStat || tmpStat.size !== size) {
+        await fsp.rm(state.temp, { force: true }).catch(() => undefined)
+        this.emitProgress(null)
+        this.options.log(
+          `${path} 接收不完整（${tmpStat?.size ?? 0}/${size} 字节），已丢弃`,
+          'in'
+        )
+        return
+      }
       await fsp.rename(state.temp, target).catch(async () => {
         await fsp.copyFile(state.temp, target)
         await fsp.rm(state.temp, { force: true }).catch(() => undefined)
