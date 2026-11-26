@@ -21,6 +21,9 @@ const peer = ref<SyncPeerState>({
 })
 const peerAddress = ref(localStorage.getItem('devtoolbox.sync.peer') ?? '')
 const peerBusy = ref(false)
+/** 已取消（不再自动同步）的文件记录 */
+const cancelRecords = ref<{ path: string; at: number; fingerprint: string }[]>([])
+const cancelDialog = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const portInput = ref(45872)
@@ -166,6 +169,23 @@ async function cancelPeer(): Promise<void> {
   } else {
     ElMessage.info('当前没有正在传输的文件')
   }
+}
+
+/** 读取「已取消」记录 */
+async function loadCancelRecords(): Promise<void> {
+  try {
+    cancelRecords.value = await window.api.sync.cancelledRecords()
+  } catch {
+    cancelRecords.value = []
+  }
+}
+
+/** 清空取消记录：这些文件恢复自动同步 */
+async function clearCancelled(): Promise<void> {
+  const count = await window.api.sync.clearCancelledRecords()
+  cancelRecords.value = []
+  cancelDialog.value = false
+  ElMessage.success(count > 0 ? `已恢复 ${count} 个文件的同步` : '没有需要恢复的文件')
 }
 
 async function refreshAll(): Promise<void> {
@@ -369,6 +389,8 @@ onMounted(() => {
   })
 
   // PC ↔ PC 状态（含进度）
+  void loadCancelRecords()
+
   stopPeerPush = window.api.sync.onPeerState((next) => {
     peer.value = next
   })
@@ -667,6 +689,9 @@ onUnmounted(() => {
       <section class="panel sync-side">
         <div class="panel-header">
           <span class="panel-title">最近同步</span>
+          <el-button v-if="cancelRecords.length" size="small" text @click="cancelDialog = true">
+            已取消 {{ cancelRecords.length }}
+          </el-button>
           <span class="spacer" />
           <el-button size="small" text :disabled="!events.length" @click="clearEvents">清空</el-button>
         </div>
@@ -685,6 +710,21 @@ onUnmounted(() => {
       </section>
     </div>
   </div>
+
+    <el-dialog v-model="cancelDialog" title="已取消的文件" width="540px">
+      <div class="muted small" style="margin-bottom: 8px">
+        这些文件取消过传输，不会再自动同步。文件内容变化后会自动恢复，也可以在这里一次性恢复。
+      </div>
+      <div class="cancel-list">
+        <div v-for="item in cancelRecords" :key="item.path" class="cancel-row" :title="item.path">
+          {{ item.path }}
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="cancelDialog = false">关闭</el-button>
+        <el-button type="primary" @click="clearCancelled">清空并恢复同步</el-button>
+      </template>
+    </el-dialog>
 </template>
 
 <style scoped>
@@ -994,4 +1034,19 @@ onUnmounted(() => {
 .mode-switch :deep(.el-radio-button__inner) {
   width: 100%;
 }
+.cancel-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.cancel-row {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--el-text-color-regular);
+  word-break: break-all;
+}
+
 </style>
