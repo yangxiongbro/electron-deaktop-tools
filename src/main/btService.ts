@@ -4,7 +4,15 @@ import { transferHub } from './transferHub'
 import { openBtLink, type BtLink } from './btBridge'
 import { hostname } from 'node:os'
 import type { SyncTransfer } from '@shared/types'
-import { clearCancelledPaths, isCancelledPath, recordSyncEvent, saveSyncSettings, syncState } from './sync'
+import {
+  cancelledRecords,
+  clearCancelledPaths,
+  isCancelledPath,
+  recordCancelledFile,
+  recordSyncEvent,
+  saveSyncSettings,
+  syncState
+} from './sync'
 
 /* ------------------------------------------------------------------ */
 /* 蓝牙自动同步服务：和 WiFi 同步一样，开着就一直盯着同步文件夹           */
@@ -165,6 +173,10 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
       pushBtStatus()
     },
     isCancelled: (path) => isCancelledPath(path),
+    onCancelled: (path, fingerprint) => {
+      // 跨会话记住：这个文件不要自动再同步（文件变了会自动解除）
+      void recordCancelledFile(path, fingerprint, 'local')
+    },
     onRequestTimeout: (path) => {
       runtime.lastLog = `请求超时：${path}`
       pushBtStatus(true)
@@ -239,6 +251,8 @@ export async function startBtSync(portName: string, options: { keep?: boolean } 
       runtime.lastLog = '模拟蓝牙已连接'
     } else {
       runtime.link = await connect(portName)
+      const saved = await cancelledRecords()
+      runtime.session.seedCancelled(saved)
       await runtime.session.attach(transport)
       runtime.lastLog = '蓝牙已开启，等待手机连接…'
     }

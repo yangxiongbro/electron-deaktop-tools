@@ -28,6 +28,17 @@ interface SyncStore {
   settings: SyncSettings
   devices: SyncDeviceRecord[]
   events: SyncEvent[]
+  /** 用户取消过的文件（跨会话保留）：文件指纹变了会自动解除 */
+  cancelled?: CancelledRecord[]
+}
+
+/** 一条「已取消」记录：路径 + 取消时的指纹（大小:修改时间） */
+export interface CancelledRecord {
+  path: string
+  fingerprint: string
+  at: number
+  /** local = 本机点的取消，peer = 对方取消 */
+  by: 'local' | 'peer'
 }
 
 interface SyncDeviceRecord extends SyncDevice {
@@ -73,6 +84,64 @@ function setTransfer(next: SyncTransfer | null): void {
 }
 
 /** 取消正在进行的传输（WiFi）。返回是否真的取消了一个任务 */
+/** 读取已取消记录（跨会话） */
+export async function cancelledRecords(): Promise<CancelledRecord[]> {
+  const store = await loadStore()
+  return store.cancelled ?? []
+}
+
+/** 记一条「已取消」：同一个文件只保留最新一条 */
+export async function recordCancelledFile(
+  path: string,
+  fingerprint: string,
+  by: 'local' | 'peer' = 'local'
+): Promise<void> {
+  if (!path) return
+  const store = await loadStore()
+  const list = (store.cancelled ?? []).filter((item) => item.path !== path)
+  list.unshift({ path, fingerprint, at: Date.now(), by })
+  // 最多保留 500 条，太旧的自动丢弃
+  store.cancelled = list.slice(0, 500)
+  cancelledPaths.add(path)
+  await persist()
+}
+
+/** 清空所有已取消记录（设置里「恢复同步」用） */
+export async function clearCancelledRecords(): Promise<number> {
+  const store = await loadStore()
+  const count = store.cancelled?.length ?? 0
+  store.cancelled = []
+  cancelledPaths.clear()
+  alreadyLoggedCancel.clear()
+  await persist()
+  return count
+}
+
+/** 文件内容变了（指纹不同）就解除它的取消记录 */
+async function releaseChangedCancelled(files: ManifestEntry[]): Promise<void> {
+  const store = await loadStore()
+  const list = store.cancelled ?? []
+  if (!list.length) return
+  const byPath = new Map(files.map((file) => [file.path, `${file.size}:${file.mtime}`]))
+  const kept: CancelledRecord[] = []
+  let released = 0
+  for (const item of list) {
+    const current = byPath.get(item.path)
+    // 文件不存在了也顺手清掉；指纹变了说明是新版本，解除
+    if (current && current === item.fingerprint) {
+      kept.push(item)
+      cancelledPaths.add(item.path)
+    } else {
+      released += 1
+      cancelledPaths.delete(item.path)
+    }
+  }
+  if (released > 0) {
+    store.cancelled = kept
+    await persist()
+  }
+}
+
 export function isCancelledPath(path: string): boolean {
   // 以中枢的取消登记表为准（三条通道共用同一份）
   return cancelledPaths.has(path) || transferHub.isCancelled(path)
@@ -98,6 +167,10 @@ export function cancelTransfer(): boolean {
     cancelledPaths.add(current.path)
     transferHub.markCancelled(current.path, 'local')
     logEventOfCancel(current)
+    // 持久化：跨会话记住「这个文件不要自动再传」，文件变了才解除
+    const stamp = lastManifest.find((file) => file.path === current.path)
+    const fingerprint = stamp ? `${stamp.size}:${stamp.mtime}` : ''
+    if (fingerprint) void recordCancelledFile(current.path, fingerprint, 'local')
   }
   return true
 }
@@ -179,7 +252,8 @@ function createDefaultStore(): SyncStore {
       btPort: ''
     },
     devices: [],
-    events: []
+    events: [],
+    cancelled: []
   }
 }
 
@@ -232,7 +306,19 @@ async function loadStore(): Promise<SyncStore> {
             .filter((item): item is SyncDeviceRecord => Boolean(item) && typeof item.id === 'string')
             .slice(0, 32)
         : [],
-      events: Array.isArray(parsed.events) ? parsed.events.slice(0, AUDIT_LIMIT) : []
+      events: Array.isArray(parsed.events) ? parsed.events.slice(0, AUDIT_LIMIT) : [],
+      // 取消记录是跨会话的：读盘时必须带上，否则重启就丢（文件会被重新同步）
+      cancelled: Array.isArray(parsed.cancelled)
+        ? parsed.cancelled
+            .filter(
+              (item): item is CancelledRecord =>
+                Boolean(item) &&
+                typeof item.path === 'string' &&
+                item.path.length > 0 &&
+                typeof item.fingerprint === 'string'
+            )
+            .slice(0, 500)
+        : []
     }
     return cache
   } catch {
@@ -265,6 +351,8 @@ async function refreshManifest(): Promise<{ version: string; files: ManifestEntr
   const root = resolveSyncDir(store.settings.syncDir)
   await fsp.mkdir(root, { recursive: true }).catch(() => undefined)
   const files = await scanSyncFolder(root, currentMaxBytes())
+  // 文件内容变了（指纹不同）就自动解除它的取消记录：取消只对当时那个版本生效
+  await releaseChangedCancelled(files)
   const version = manifestVersion(files)
   if (version !== lastVersion) {
     lastVersion = version
@@ -461,6 +549,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           // 对端中途断开 = 对方取消了接收（本端主动取消的那种已经记过了，不再重复）
           cancelledPaths.add(filePath)
           transferHub.markCancelled(filePath, 'peer')
+          const info = lastManifest.find((file) => file.path === filePath)
+          if (info) void recordCancelledFile(filePath, `${info.size}:${info.mtime}`, 'peer')
           logEvent(store, {
             direction: 'out',
             path: filePath,
@@ -562,6 +652,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       setTransfer(null)
       cancelledPaths.add(uploadPath)
       transferHub.markCancelled(uploadPath, 'peer')
+      void recordCancelledFile(uploadPath, `${received}`, 'peer')
       if (!alreadyLoggedCancel.has(uploadPath)) {
         logEvent(store, {
           direction: 'in',
@@ -686,8 +777,11 @@ export async function saveSyncSettings(patch: Partial<SyncSettings>): Promise<Sy
 }
 
 export async function startSync(): Promise<SyncState> {
-  clearCancelledPaths()
+  // 不要把取消记录清掉：跨会话保留，只有文件变化或用户手动清空才解除
   alreadyLoggedCancel.clear()
+  const records = await cancelledRecords()
+  for (const item of records) cancelledPaths.add(item.path)
+  if (records.length > 0) console.log(`[sync] 已加载 ${records.length} 条取消记录`)
   // 开启同步的这一刻打基线：此前的文件视为「已经同步过」
   await captureBaseline()
   return saveSyncSettings({ enabled: true })

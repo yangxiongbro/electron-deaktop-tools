@@ -51,6 +51,8 @@ export interface BtSyncOptions {
   onSent?: (path: string, size: number) => void
   /** 一个文件接收完成 */
   onReceived?: (path: string, size: number) => void
+  /** 本端取消了一个文件（用于持久化「不要自动再传」） */
+  onCancelled?: (path: string, fingerprint: string) => void
   /** 发出了一个文件请求（用于界面/日志展示） */
   onRequest?: (path: string) => void
   /** 请求超时：对方没有这个文件，或没有响应 */
@@ -131,6 +133,8 @@ export class BtSyncSession {
   /** 刚收完的文件：path -> { size, at }，短时间内不再重复请求（防止两端来回重传） */
   private readonly completed = new Map<string, { size: number; at: number }>()
   private readonly sending = new Set<string>()
+  /** 本端文件当前指纹（path -> 大小:修改时间），取消时一起持久化 */
+  private readonly fileStamp = new Map<string, string>()
   /** 每个路径上一次见到的远端指纹（用于判断「文件变了」从而解除取消/超时） */
   private readonly seenFingerprint = new Map<string, string>()
   /** 请求超时的文件：本次会话不再自动重试（不等于「取消」，不影响进度/发送判定） */
@@ -175,6 +179,15 @@ export class BtSyncSession {
       void this.refreshLocal(ticks % 7 === 0)
       this.checkRequestTimeouts()
     }, MANIFEST_INTERVAL_MS)
+  }
+
+  /** 把持久化的取消记录注入本次会话（跨会话保留的取消） */
+  seedCancelled(records: Array<{ path: string; fingerprint: string }>): void {
+    for (const record of records) {
+      if (!record.path) continue
+      this.cancelled.mark(record.path, 'local')
+      if (record.fingerprint) this.seenFingerprint.set(record.path, record.fingerprint)
+    }
   }
 
   detach(): void {
@@ -413,6 +426,8 @@ export class BtSyncSession {
     if (!isNew) return false
     this.send({ t: 'skip', p: path })
     this.sendManifest()
+    const stamp = this.fileStamp.get(path) ?? ''
+    if (stamp) this.options.onCancelled?.(path, stamp)
     return true
   }
 
@@ -473,6 +488,7 @@ export class BtSyncSession {
     // 发完把它记进基线，避免每轮清单都把它当「变化」再发给对方
     this.baseline.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
     this.syncedAt.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
+    this.fileStamp.set(path, `${stat.size}:${Math.round(stat.mtimeMs)}`)
     this.emitProgress(null)
     this.options.log(`已发送 ${path}（${(data.length / 1024).toFixed(0)} KB）`, 'out', { path, size: data.length })
     this.options.onSent?.(path, data.length)
@@ -565,6 +581,7 @@ export class BtSyncSession {
       const stampText = `${size}:${mtime > 0 ? mtime : Date.now()}`
       this.baseline.set(path, stampText)
       this.syncedAt.set(path, stampText)
+      this.fileStamp.set(path, stampText)
       this.completed.set(path, { size, at: Date.now() })
       this.emitProgress(null)
       this.options.log(`收到 ${path}（${(size / 1024).toFixed(0)} KB）`, 'in', { path, size })

@@ -30,7 +30,8 @@ import type {
   SyncSettings,
   SyncState,
   SyncTransfer,
-  SyncPeerState
+  SyncPeerState,
+  SyncCancelRecord
 } from '@shared/types'
 
 const api: DesktopApi = {
@@ -125,6 +126,9 @@ const api: DesktopApi = {
     peerState: () => ipcRenderer.invoke('sync:peer-state') as Promise<SyncPeerState>,
     /** 取消当前的 PC ↔ PC 传输 */
     peerCancel: () => ipcRenderer.invoke('sync:cancel-transfer') as Promise<{ ok: boolean; kind: 'wifi' | 'bt' | 'peer' | '' }>,
+    /** 已取消（不再自动同步）的文件 */
+    cancelledRecords: () => ipcRenderer.invoke('sync:cancelled-records') as Promise<SyncCancelRecord[]>,
+    clearCancelledRecords: () => ipcRenderer.invoke('sync:clear-cancelled-records') as Promise<number>,
     onPeerState: (listener: (state: SyncPeerState) => void) => {
       const handler = (_event: unknown, value: SyncPeerState): void => listener(value)
       ipcRenderer.on('sync:peer-state', handler)

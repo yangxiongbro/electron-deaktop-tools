@@ -40,6 +40,8 @@ import {
   startSync,
   stopSync,
   syncState,
+  cancelledRecords,
+  clearCancelledRecords,
   registerWifiCancel
 } from './sync'
 import { abortHttpRequest, performHttpRequest } from './httpClient'
@@ -522,6 +524,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sync:bt-status', () => btStatus())
 
   ipcMain.handle('sync:peer-state', () => peerSync.snapshot())
+
+  ipcMain.handle('sync:cancelled-records', () => cancelledRecords())
+  ipcMain.handle('sync:clear-cancelled-records', () => clearCancelledRecords())
 
   // PC ↔ PC 的状态 / 进度变化时推给界面
   peerSync.onChange(() => {

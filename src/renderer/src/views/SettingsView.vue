@@ -17,6 +17,8 @@ const chatState = ref<ChatState | null>(null)
 const chatPort = ref('')
 const syncState = ref<SyncState | null>(null)
 const syncMaxMb = ref(100)
+/** 已取消（不再自动同步）的文件 */
+const cancelRecords = ref<{ path: string; at: number }[]>([])
 
 async function chooseDir(): Promise<void> {
   const result = await window.api.settings.chooseDownloadDir()
@@ -51,6 +53,7 @@ function toggleApiAutoSave(value: boolean): void {
 
 onMounted(async () => {
   void loadSyncState()
+  void loadCancelRecords()
   try {
     info.value = await window.api.app.info()
   } catch {
@@ -107,6 +110,22 @@ async function chooseSyncDir(): Promise<void> {
   if (pick.canceled) return
   syncState.value = await window.api.sync.state()
   ElMessage.success('同步文件夹已更新')
+}
+
+/** 读取已取消文件列表 */
+async function loadCancelRecords(): Promise<void> {
+  try {
+    cancelRecords.value = await window.api.sync.cancelledRecords()
+  } catch {
+    cancelRecords.value = []
+  }
+}
+
+/** 清空取消记录：这些文件恢复自动同步 */
+async function clearCancelRecords(): Promise<void> {
+  const count = await window.api.sync.clearCancelledRecords()
+  cancelRecords.value = []
+  ElMessage.success(count > 0 ? `已恢复 ${count} 个文件的同步` : '没有需要恢复的文件')
 }
 
 async function openSyncDir(): Promise<void> {
@@ -176,6 +195,20 @@ async function openChatDir(): Promise<void> {
           </button>
         </div>
 
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">已取消的文件</div>
+            <div class="muted small">
+              这些文件取消过传输，不会再自动同步；文件内容变化后会自动恢复。共
+              {{ cancelRecords.length }} 个。
+            </div>
+          </div>
+          <div class="port-row">
+            <el-button size="small" :disabled="!cancelRecords.length" @click="clearCancelRecords">
+              清空并恢复同步
+            </el-button>
+          </div>
+        </div>
         <div class="setting-row">
           <div>
             <div class="row-title">折叠侧边栏</div>

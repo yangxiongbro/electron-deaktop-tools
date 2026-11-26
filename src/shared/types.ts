@@ -534,6 +534,15 @@ export interface SyncTransfer {
   outgoing: boolean
 }
 
+/** 一条「已取消」的文件记录（跨会话保留） */
+export interface SyncCancelRecord {
+  path: string
+  /** 取消时的指纹（大小:修改时间），文件变了就自动解除 */
+  fingerprint: string
+  at: number
+  by: 'local' | 'peer'
+}
+
 /** PC ↔ PC 同步（WiFi）的连接状态 */
 export interface SyncPeerState {
   running: boolean
@@ -813,6 +822,10 @@ export interface DesktopApi {
     debugBtWant(path: string): Promise<boolean>
     /** 连接另一台电脑（PC ↔ PC，WiFi） */
     peerStart(input: { host: string; port: number }): Promise<SyncPeerState>
+    /** 已取消（不再自动同步）的文件记录 */
+    cancelledRecords(): Promise<SyncCancelRecord[]>
+    /** 清空已取消记录，恢复这些文件的同步 */
+    clearCancelledRecords(): Promise<number>
     peerStop(): Promise<SyncPeerState>
     /** 取消当前的 PC ↔ PC 传输 */
     peerCancel(): Promise<{ ok: boolean; kind: 'wifi' | 'bt' | 'peer' | '' }>
