@@ -189,6 +189,7 @@ async function clearCancelled(): Promise<void> {
 }
 
 async function refreshAll(): Promise<void> {
+  void loadCancelRecords()
   await refresh()
   if (mode.value === 'bt') await refreshPorts()
   await refreshBtStatus()
@@ -390,6 +391,14 @@ onMounted(() => {
 
   // PC ↔ PC 状态（含进度）
   void loadCancelRecords()
+
+  // 「最近同步」变化（有新的完成 / 取消）时刷新「已取消」数量
+  watch(
+    () => state.value?.events?.length ?? 0,
+    () => {
+      void loadCancelRecords()
+    }
+  )
 
   stopPeerPush = window.api.sync.onPeerState((next) => {
     peer.value = next

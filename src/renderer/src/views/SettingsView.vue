@@ -195,21 +195,7 @@ async function openChatDir(): Promise<void> {
           </button>
         </div>
 
-        <div class="setting-row">
-          <div>
-            <div class="setting-label">已取消的文件</div>
-            <div class="muted small">
-              这些文件取消过传输，不会再自动同步；文件内容变化后会自动恢复。共
-              {{ cancelRecords.length }} 个。
-            </div>
-          </div>
-          <div class="port-row">
-            <el-button size="small" :disabled="!cancelRecords.length" @click="clearCancelRecords">
-              清空并恢复同步
-            </el-button>
-          </div>
-        </div>
-        <div class="setting-row">
+                <div class="setting-row">
           <div>
             <div class="row-title">折叠侧边栏</div>
             <div class="row-desc muted small">折叠后只显示图标，鼠标悬停可查看工具名称。</div>
@@ -311,6 +297,20 @@ async function openChatDir(): Promise<void> {
           <div class="dir-row">
             <el-button :icon="FolderOpened" @click="chooseSyncDir">选择目录</el-button>
             <el-button :icon="FolderOpened" @click="openSyncDir">打开</el-button>
+          </div>
+        </div>
+      
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">已取消的文件</div>
+            <div class="muted small">
+              这些文件取消过传输，不会再自动同步；文件内容变化后会自动恢复。共 {{ cancelRecords.length }} 个。
+            </div>
+          </div>
+          <div class="port-row">
+            <el-button size="small" :disabled="!cancelRecords.length" @click="clearCancelRecords">
+              清空并恢复同步
+            </el-button>
           </div>
         </div>
       </section>
