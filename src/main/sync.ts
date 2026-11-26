@@ -126,6 +126,12 @@ async function releaseChangedCancelled(files: ManifestEntry[]): Promise<void> {
   const kept: CancelledRecord[] = []
   let released = 0
   for (const item of list) {
+    // '*' 表示「粘性取消」（上传被中断时拿不到最终指纹），只能手动清空
+    if (item.fingerprint === '*') {
+      kept.push(item)
+      cancelledPaths.add(item.path)
+      continue
+    }
     const current = byPath.get(item.path)
     // 文件不存在了也顺手清掉；指纹变了说明是新版本，解除
     if (current && current === item.fingerprint) {
@@ -596,6 +602,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         cancelledPaths.add(uploadPath)
         transferHub.markCancelled(uploadPath, 'peer')
         setTransfer(null)
+        void recordCancelledFile(uploadPath, '*', 'peer')
         if (!alreadyLoggedCancel.has(uploadPath)) {
           alreadyLoggedCancel.add(uploadPath)
           setTimeout(() => alreadyLoggedCancel.delete(uploadPath), 10000)
@@ -652,7 +659,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       setTransfer(null)
       cancelledPaths.add(uploadPath)
       transferHub.markCancelled(uploadPath, 'peer')
-      void recordCancelledFile(uploadPath, `${received}`, 'peer')
+      // 上传取消时拿不到最终指纹，用 '*' 表示「一直有效」；文件不存在/内容变化都不会自动解除，
+      // 需要用户在设置里「清空并恢复同步」或再次成功同步该文件
+      void recordCancelledFile(uploadPath, '*', 'peer')
       if (!alreadyLoggedCancel.has(uploadPath)) {
         logEvent(store, {
           direction: 'in',
