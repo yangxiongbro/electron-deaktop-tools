@@ -483,6 +483,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const changed = changedSinceBaseline(files)
     sendJson(res, 200, {
       ok: true,
+      c: [...cancelledPaths],
       version: manifestVersion(changed),
       fileCount: changed.length,
       files: changed
@@ -674,6 +675,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         void persist()
       }
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: (error as Error).message })
+    }
+    return
+  }
+
+  // 手机报告它取消过哪些文件（和蓝牙的 skip / 清单 c 字段等价）
+  if (req.method === 'POST' && url.pathname === '/sync/cancelled') {
+    try {
+      const body = await readBody(req, 64 * 1024)
+      const payload = JSON.parse(body.toString('utf8') || '{}') as { paths?: string[] }
+      const paths = Array.isArray(payload.paths) ? payload.paths.filter((item) => typeof item === 'string') : []
+      for (const item of paths) {
+        if (!item) continue
+        cancelledPaths.add(item)
+        // 指纹未知：用粘性记录，只能手动清空（与上传中断的处理一致）
+        void recordCancelledFile(item, '*', 'peer')
+      }
+      sendJson(res, 200, { ok: true, cancelled: [...cancelledPaths] })
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: (error as Error).message })
     }
     return
   }
