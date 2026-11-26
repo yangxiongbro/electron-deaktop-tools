@@ -373,13 +373,19 @@ async function refreshBtStatus(): Promise<void> {
     // 忽略轮询错误
   }
 }
+/** 同步记录的时间：显示具体时刻（今天只显示 HH:mm，跨天带日期） */
 function whenText(at: number): string {
   if (!at) return '-'
-  const diff = Date.now() - at
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
-  return new Date(at).toLocaleDateString()
+  const date = new Date(at)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const now = new Date()
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  if (sameDay) return clock
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`
 }
 
 onMounted(() => {
