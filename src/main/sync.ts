@@ -501,7 +501,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       await fsp.mkdir(dirname(target), { recursive: true })
       let cancelUpload = false
       transferAbort = () => {
-        // 不直接断连接：让手机能读到 409，明确知道是「电脑端取消」，而不是网络错误
         if (cancelUpload) return
         cancelUpload = true
         cancelledPaths.add(uploadPath)
@@ -518,6 +517,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           })
           void persist()
         }
+        // 先把 409 回出去（手机据此知道是「电脑端取消」而不是网络错误），
+        // 再把连接断掉：这样手机不会继续把剩下的字节发完，进度也不会跑到满值
+        if (!res.headersSent) sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+        setTimeout(() => {
+          try {
+            req.destroy()
+          } catch {
+            // 忽略
+          }
+        }, 300)
       }
       setTransfer({ path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false })
       const body = await readBody(req, undefined, (sent, total) => {
@@ -528,7 +537,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       transferAbort = null
       setTransfer(null)
       if (cancelUpload) {
-        sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+        if (!res.headersSent) {
+          sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+        }
         return
       }
       const stream = createWriteStream(target)
