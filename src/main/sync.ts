@@ -586,8 +586,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
     const uploadPath = relativePath
     if (cancelledPaths.has(uploadPath)) {
-      // 这个文件本端已经取消过：告诉手机别再传了
+      // 这个文件本端已经取消过：告诉手机别再传了。
+      // 先回 409，再把请求体读掉：这样手机能马上读到响应，而不是一直往死缓冲区里写
       sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+      req.resume()
       return
     }
     const ip = clientIp(req)
