@@ -433,18 +433,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
       setTransfer({ path: filePath, sent: 0, total: stat.size, outgoing: true })
       stream.on('data', (chunk: Buffer | string) => {
+        // 已经收尾（完成 / 被取消）之后迟到的数据块一律忽略，
+        // 否则界面会把进度又推回 100%，看起来像「取消后状态没恢复」
+        if (finished) return
         sent += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
         setTransfer({ path: filePath, sent, total: stat.size, outgoing: true })
       })
       const ip = clientIp(req)
       const device = touchDevice(store, { id: url.searchParams.get('device') ?? ip }, ip, store.settings.port)
       let finished = false
+      // 说明：finished 在下面的 data 回调里被读取，声明放在订阅之前
       const finish = (): void => {
         if (finished) return
         finished = true
         transferAbort = null
         setTransfer(null)
-        if (sent >= stat.size) {
+        // 用「响应是否完整写完」判断，而不是已读字节数：
+        // 对端在末尾断开时，字节可能已经全部进了 socket 缓冲（sent == size），但实际没收到
+        const completed = res.writableFinished
+        if (completed) {
           // 完整发完：记一条「发送」记录（之前漏了，手机上收到了电脑却没有记录）
           device.filesSynced += 1
           device.lastSyncAt = Date.now()
@@ -492,14 +499,38 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     let received = 0
     try {
       await fsp.mkdir(dirname(target), { recursive: true })
-      transferAbort = () => req.destroy()
+      let cancelUpload = false
+      transferAbort = () => {
+        // 不直接断连接：让手机能读到 409，明确知道是「电脑端取消」，而不是网络错误
+        if (cancelUpload) return
+        cancelUpload = true
+        cancelledPaths.add(uploadPath)
+        transferHub.markCancelled(uploadPath, 'peer')
+        setTransfer(null)
+        if (!alreadyLoggedCancel.has(uploadPath)) {
+          alreadyLoggedCancel.add(uploadPath)
+          setTimeout(() => alreadyLoggedCancel.delete(uploadPath), 10000)
+          logEvent(store, {
+            direction: 'in',
+            path: uploadPath,
+            device: `${device.name}（已取消）`,
+            size: received
+          })
+          void persist()
+        }
+      }
       setTransfer({ path: uploadPath, sent: 0, total: Number(req.headers['content-length'] ?? 0) || 0, outgoing: false })
       const body = await readBody(req, undefined, (sent, total) => {
         received = sent
-        setTransfer({ path: uploadPath, sent, total: total || sent, outgoing: false })
+        // 取消后不再刷进度，但继续把数据收完，好把 409 回给手机
+        if (!cancelUpload) setTransfer({ path: uploadPath, sent, total: total || sent, outgoing: false })
       })
       transferAbort = null
       setTransfer(null)
+      if (cancelUpload) {
+        sendJson(res, 409, { ok: false, cancelled: true, error: '已取消该文件的传输' })
+        return
+      }
       const stream = createWriteStream(target)
       stream.end(body)
       await new Promise<void>((resolve, reject) => {
