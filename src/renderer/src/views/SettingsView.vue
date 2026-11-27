@@ -19,6 +19,8 @@ const syncState = ref<SyncState | null>(null)
 const syncMaxMb = ref(100)
 /** 已取消（不再自动同步）的文件 */
 const cancelRecords = ref<{ path: string; at: number }[]>([])
+/** 文件同步端口（WiFi） */
+const syncPort = ref(45872)
 
 async function chooseDir(): Promise<void> {
   const result = await window.api.settings.chooseDownloadDir()
@@ -128,6 +130,21 @@ async function clearCancelRecords(): Promise<void> {
   ElMessage.success(count > 0 ? `已恢复 ${count} 个文件的同步` : '没有需要恢复的文件')
 }
 
+/** 保存文件同步端口 */
+async function saveSyncPort(): Promise<void> {
+  const port = Number(syncPort.value)
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    ElMessage.warning('端口需要在 1024 ~ 65535 之间')
+    return
+  }
+  try {
+    syncState.value = await window.api.sync.save({ port })
+    ElMessage.success(`端口已设为 ${port}（同步会重启）`)
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
 async function openSyncDir(): Promise<void> {
   const dir = syncState.value?.syncDir
   if (!dir) return
@@ -139,6 +156,7 @@ async function loadSyncState(): Promise<void> {
     const next = await window.api.sync.state()
     syncState.value = next
     syncMaxMb.value = next.settings.maxFileMb ?? 100
+    syncPort.value = next.settings.port ?? 45872
   } catch {
     // 读不到就用默认值
   }
@@ -300,6 +318,18 @@ async function openChatDir(): Promise<void> {
           </div>
         </div>
       
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">同步端口</div>
+            <div class="muted small">
+              WiFi 同步监听端口（默认 45872，可设 1024 ~ 65535）。手机端填地址时带上这个端口。
+            </div>
+          </div>
+          <div class="port-row">
+            <el-input-number v-model="syncPort" :min="1024" :max="65535" controls-position="right" style="width: 130px" />
+            <el-button size="small" @click="saveSyncPort">保存</el-button>
+          </div>
+        </div>
         <div class="setting-row">
           <div>
             <div class="setting-label">已取消的文件</div>

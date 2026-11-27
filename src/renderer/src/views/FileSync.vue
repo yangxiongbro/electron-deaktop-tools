@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, CopyDocument, Delete, FolderOpened, Refresh, VideoPlay, VideoPause } from '@element-plus/icons-vue'
+import { Connection, CopyDocument, Delete, FolderOpened, QuestionFilled, Refresh, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import type { BtSyncStatus, SerialPortInfo, SyncPeerState, SyncState } from '@shared/types'
 import { formatBytes } from '../utils/format'
 import { copyText } from '../utils/clipboard'
@@ -21,12 +21,13 @@ const peer = ref<SyncPeerState>({
 })
 const peerAddress = ref(localStorage.getItem('devtoolbox.sync.peer') ?? '')
 const peerBusy = ref(false)
+/** 「说明」弹窗 */
+const helpDialog = ref(false)
 /** 已取消（不再自动同步）的文件记录 */
 const cancelRecords = ref<{ path: string; at: number; fingerprint: string }[]>([])
 const cancelDialog = ref(false)
 const loading = ref(false)
 const busy = ref(false)
-const portInput = ref(45872)
 
 let timer: number | undefined
 /** 蓝牙模式下 1 秒刷新一次状态（进度变化快） */
@@ -199,7 +200,6 @@ async function refresh(): Promise<void> {
   try {
     const next = await window.api.sync.state()
     state.value = next
-    portInput.value = next.port
   } catch (error) {
     ElMessage.error(`读取同步状态失败：${(error as Error).message}`)
   }
@@ -215,23 +215,6 @@ async function toggle(): Promise<void> {
       // 停止后端口可能已被释放，重新读一次确保状态一致
       await refresh()
     }
-  } catch (error) {
-    ElMessage.error((error as Error).message)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function savePort(): Promise<void> {
-  const port = Number(portInput.value)
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-    ElMessage.warning('端口需要在 1024 - 65535 之间')
-    return
-  }
-  busy.value = true
-  try {
-    state.value = await window.api.sync.save({ port })
-    ElMessage.success('端口已保存')
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {
@@ -262,7 +245,7 @@ async function clearEvents(): Promise<void> {
 }
 
 async function copyAddress(address: string): Promise<void> {
-  const port = state.value?.port ?? portInput.value
+  const port = state.value?.port
   const ok = await copyText(`${address}:${port}`)
   if (ok) ElMessage.success('已复制连接地址')
 }
@@ -480,11 +463,7 @@ onUnmounted(() => {
       <el-button :icon="FolderOpened" @click="openDir">打开同步文件夹</el-button>
       <el-button :icon="Refresh" @click="refreshAll">刷新</el-button>
 
-      <template v-if="mode === 'wifi'">
-        <span class="small muted">端口</span>
-        <el-input-number v-model="portInput" :min="1024" :max="65535" size="small" controls-position="right" style="width: 130px" />
-        <el-button size="small" @click="savePort">保存端口</el-button>
-      </template>
+      <el-button :icon="QuestionFilled" @click="helpDialog = true">说明</el-button>
 
       <div class="spacer" />
       <el-tag :type="activeRunning ? 'success' : 'info'" effect="plain" size="small">
@@ -520,13 +499,10 @@ onUnmounted(() => {
 
           <!-- WiFi 连接 -->
           <template v-if="mode === 'wifi'">
-            <div class="small muted">
-              手机安装「录屏助手」（android-tools）后在「文件同步」里选 WiFi，填下面任意一个地址即可。
-              手机与电脑需要在同一个 WiFi / 局域网内。
-            </div>
+            <div class="small muted">手机端「文件同步」选 WiFi，填下面任意一个地址即可。</div>
             <div v-if="!addresses.length" class="small muted">没有可用的局域网地址，请检查网络连接。</div>
             <div v-for="item in addresses" :key="item.address" class="address-row">
-              <span class="mono">{{ item.address }}:{{ state?.port ?? portInput }}</span>
+              <span class="mono">{{ item.address }}:{{ state?.port ?? 45872 }}</span>
               <span class="small muted iface">{{ item.label }}</span>
               <el-tooltip content="复制地址" placement="top">
                 <button class="icon-btn" type="button" @click="copyAddress(item.address)">
@@ -534,18 +510,48 @@ onUnmounted(() => {
                 </button>
               </el-tooltip>
             </div>
-            <div class="small muted tips">
-              <div>· 手机 → 电脑：把文件放进手机端同步文件夹，会自动发送到这里。</div>
-              <div>· 电脑 → 手机：往这个文件夹里放文件 / 改文件，手机会按清单变化自动拉取。</div>
-              <div>· 所有类型的文件都会同步，超过上限的会跳过。</div>
+            <div class="divider" />
+
+            <!-- 连接另一台电脑（PC ↔ PC） -->
+            <div class="peer-block">
+              <div class="peer-head">
+                <span class="small strong">连接另一台电脑</span>
+                <span class="spacer" />
+                <span class="status-pill" :class="peer.running ? (peer.connected ? 'idle' : 'active') : 'off'">
+                  <span class="status-dot"></span>
+                  {{ peer.running ? (peer.connected ? '已连接' : '连接中') : '未连接' }}
+                </span>
+              </div>
+              <el-input v-model="peerAddress" size="small" placeholder="192.168.1.8:45872" clearable />
+              <el-button size="small" :type="peer.running ? 'danger' : 'primary'" :loading="peerBusy" @click="togglePeer">
+                {{ peer.running ? '断开对端电脑' : '连接对端电脑' }}
+              </el-button>
+              <div v-if="peer.running" class="small muted">
+                对端 {{ peer.remoteCount }} 个文件 · 已接收 {{ peer.downloaded }} · 已发送 {{ peer.uploaded }}
+              </div>
+              <div v-if="peer.lastError" class="small" style="color: var(--el-color-danger)">{{ peer.lastError }}</div>
+              <template v-if="peer.transfer">
+                <div class="transfer-head">
+                  <el-tag size="small" :type="peer.transfer.outgoing ? 'primary' : 'success'" effect="plain">
+                    {{ peer.transfer.outgoing ? '发送' : '接收' }}
+                  </el-tag>
+                  <span class="transfer-path" :title="peer.transfer.path">{{ peer.transfer.path }}</span>
+                </div>
+                <el-progress
+                  :percentage="peer.transfer.total ? Math.min(100, Math.round((peer.transfer.sent / peer.transfer.total) * 100)) : 0"
+                  :stroke-width="8"
+                />
+                <div class="transfer-meta small muted">
+                  <span>{{ formatBytes(peer.transfer.sent) }} / {{ formatBytes(peer.transfer.total) }}</span>
+                  <el-button size="small" type="danger" plain @click="cancelPeer">取消</el-button>
+                </div>
+              </template>
             </div>
           </template>
 
           <!-- 蓝牙连接 -->
           <template v-else>
-            <div class="small muted">
-              先在 Windows「设置 → 蓝牙和其他设备」与手机配对，选那台设备后点左上角「开启同步」即可，和 WiFi 一样自动互传。
-            </div>
+            <div class="small muted">先与手机配对，选下面的设备后点「开启同步」。</div>
             <el-select v-model="btPort" size="small" placeholder="选择蓝牙设备" style="width: 100%">
               <el-option
                 v-for="port in serialPorts"
@@ -561,50 +567,9 @@ onUnmounted(() => {
             <div v-if="!serialPorts.length" class="small muted">
               没有检测到已配对的蓝牙设备。先在 Windows「设置 → 蓝牙和其他设备」里配对手机。
             </div>
-            <div class="small muted tips">
-              <div>· 手机端「文件同步」选蓝牙，选中这台电脑后开启同步。</div>
-              <div>· 电脑 → 手机 / 手机 → 电脑 都是最后写入的一方生效。</div>
-            </div>
+
             <div v-if="missingPort" class="small bt-hint">
               设备已配对但 Windows 没给它建串口：打开「蓝牙和其他设备 → 更多蓝牙选项 → COM 端口 → 添加 → 传入」，加完点「刷新设备」。
-            </div>
-          </template>
-        </div>
-      </section>
-
-      <section v-if="mode === 'wifi'" class="panel sync-side">
-        <div class="panel-header">
-          <span class="panel-title">连接另一台电脑</span>
-          <span class="spacer" />
-          <span class="status-pill" :class="peer.running ? (peer.connected ? 'idle' : 'active') : 'off'">
-            <span class="status-dot"></span>
-            {{ peer.running ? (peer.connected ? '已连接' : '连接中') : '未连接' }}
-          </span>
-        </div>
-        <div class="panel-body sync-info">
-          <el-input v-model="peerAddress" size="small" placeholder="192.168.1.8:45872" clearable />
-          <el-button size="small" :type="peer.running ? 'danger' : 'primary'" :loading="peerBusy" @click="togglePeer">
-            {{ peer.running ? '断开对端电脑' : '连接对端电脑' }}
-          </el-button>
-          <div class="small muted">对端电脑也要打开「文件同步」并点「开启同步」，两台电脑在同一网络下即可互传。</div>
-          <div v-if="peer.running" class="small muted">
-            对端 {{ peer.remoteCount }} 个文件 · 已接收 {{ peer.downloaded }} 个 · 已发送 {{ peer.uploaded }} 个
-          </div>
-          <div v-if="peer.lastError" class="small" style="color: var(--el-color-danger)">{{ peer.lastError }}</div>
-          <template v-if="peer.transfer">
-            <div class="transfer-head">
-              <el-tag size="small" :type="peer.transfer.outgoing ? 'primary' : 'success'" effect="plain">
-                {{ peer.transfer.outgoing ? '发送' : '接收' }}
-              </el-tag>
-              <span class="transfer-path" :title="peer.transfer.path">{{ peer.transfer.path }}</span>
-            </div>
-            <el-progress
-              :percentage="peer.transfer.total ? Math.min(100, Math.round((peer.transfer.sent / peer.transfer.total) * 100)) : 0"
-              :stroke-width="8"
-            />
-            <div class="transfer-meta small muted">
-              <span>{{ formatBytes(peer.transfer.sent) }} / {{ formatBytes(peer.transfer.total) }}</span>
-              <el-button size="small" type="danger" plain @click="cancelPeer">取消</el-button>
             </div>
           </template>
         </div>
@@ -740,7 +705,33 @@ onUnmounted(() => {
         <el-button type="primary" @click="clearCancelled">清空并恢复同步</el-button>
       </template>
     </el-dialog>
-</template>
+
+    <el-dialog
+      v-model="helpDialog"
+      :title="mode === 'wifi' ? 'WiFi 同步说明' : '蓝牙同步说明'"
+      width="560px"
+    >
+      <div class="help-body">
+        <template v-if="mode === 'wifi'">
+          <p><b>1. 电脑端</b>：端口在「应用设置 → 文件同步」里改（默认 45872），点左上角「开启同步」。</p>
+          <p><b>2. 手机端</b>：打开「文件同步」→ 选 WiFi → 填上面显示的任一地址（如 192.168.31.156:45872）→ 开始同步。</p>
+          <p><b>3. 双向同步</b>：把文件放进任一端的同步文件夹，另一端会按清单自动拉取；只同步「开启同步之后」新增或修改的文件。</p>
+          <p><b>4. 取消</b>：任意一端点「取消」，该文件本次不再传输；被取消的文件可以在「最近同步」右上角「已取消」里查看或恢复。</p>
+          <p><b>5. 限制</b>：超过单个文件上限（默认 100 MB）的文件会跳过；手机与电脑需要在同一个 WiFi / 局域网内。</p>
+        </template>
+        <template v-else>
+          <p><b>1. 配对</b>：Windows「设置 → 蓝牙和其他设备」与手机配对。</p>
+          <p><b>2. 串口</b>：配对后如果设备行提示没有 COM 口，打开「更多蓝牙选项 → COM 端口 → 添加 → 传入」，再点「刷新设备」。</p>
+          <p><b>3. 连接</b>：电脑端选那台设备、点「开启同步」；手机端选蓝牙 → 选中这台电脑 → 开始同步。电脑后开也能自动连上。</p>
+          <p><b>4. 同步</b>：双向自动同步；两端都改同一个文件时，最后写入的一方生效。</p>
+          <p><b>5. 取消</b>：任意一端点「取消」即可，取消信息会随清单同步到对端。</p>
+        </template>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="helpDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
+  </template>
 
 <style scoped>
 .sync-page {
@@ -1049,6 +1040,29 @@ onUnmounted(() => {
 .mode-switch :deep(.el-radio-button__inner) {
   width: 100%;
 }
+.help-body p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+
+.peer-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.peer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.peer-head .strong {
+  font-weight: 600;
+}
+
 .cancel-list {
   max-height: 280px;
   overflow-y: auto;
