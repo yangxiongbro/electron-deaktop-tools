@@ -176,20 +176,26 @@ const openTabItems = computed(() =>
     .filter((item): item is { id: string; record: ApiRequestRecord } => item.record !== null)
 )
 
-/** 关闭一个 Tab；关的是当前 Tab 就切到相邻的 */
-async function closeTab(id: string): Promise<void> {
+/**
+ * 关闭一个 Tab。
+ * 关的是当前 Tab 时切到相邻的；如果是最后一个，就回到「未选中」状态（不再自动打开别的请求，
+ * 否则看起来像"最后一个 Tab 关不掉"）。
+ */
+function closeTab(id: string): void {
   const index = openTabs.value.indexOf(id)
   if (index < 0) return
   openTabs.value.splice(index, 1)
   if (currentRequestId.value !== id) return
-  const next = openTabs.value[index] ?? openTabs.value[index - 1] ?? ''
+
+  const nextId = openTabs.value[index] ?? openTabs.value[index - 1] ?? ''
+  const next = nextId ? (currentRequests.value.find((item) => item.id === nextId) ?? null) : null
   if (next) {
-    await selectRequest(next)
+    loadRecord(next)
+    ensureTab(next.id)
+    saveSelection()
     return
   }
-  const remaining = currentRequests.value.find((item) => item.id !== id) ?? null
-  loadRecord(remaining)
-  if (remaining) ensureTab(remaining.id)
+  loadRecord(null)
   saveSelection()
 }
 
