@@ -159,6 +159,40 @@ const saveError = ref('')
 const lastSavedAt = ref(0)
 const pendingSaves = ref(0)
 
+/** 同时打开的请求（顶部 Tab 切换）：存请求 id，顺序即标签顺序 */
+const openTabs = ref<string[]>([])
+/** 当前激活的 Tab（就是当前编辑的请求） */
+const activeTabId = computed(() => currentRequestId.value)
+
+function ensureTab(id: string): void {
+  if (!id) return
+  if (!openTabs.value.includes(id)) openTabs.value.push(id)
+}
+
+/** Tab 列表（带请求记录，供模板渲染） */
+const openTabItems = computed(() =>
+  openTabs.value
+    .map((id) => ({ id, record: currentRequests.value.find((item) => item.id === id) ?? null }))
+    .filter((item): item is { id: string; record: ApiRequestRecord } => item.record !== null)
+)
+
+/** 关闭一个 Tab；关的是当前 Tab 就切到相邻的 */
+async function closeTab(id: string): Promise<void> {
+  const index = openTabs.value.indexOf(id)
+  if (index < 0) return
+  openTabs.value.splice(index, 1)
+  if (currentRequestId.value !== id) return
+  const next = openTabs.value[index] ?? openTabs.value[index - 1] ?? ''
+  if (next) {
+    await selectRequest(next)
+    return
+  }
+  const remaining = currentRequests.value.find((item) => item.id !== id) ?? null
+  loadRecord(remaining)
+  if (remaining) ensureTab(remaining.id)
+  saveSelection()
+}
+
 const requestTab = ref('params')
 const responseSection = ref('body')
 const bodyView = ref<'pretty' | 'tree'>('tree')
@@ -687,10 +721,12 @@ function buildDraft(): ApiRequestDraft {
 /* ------------------------------ 选择切换 ------------------------------ */
 
 async function selectRequest(id: string): Promise<void> {
-  if (!id || id === currentRequestId.value) return
+  if (!id) return
+  if (id === currentRequestId.value) return
   if (!(await ensureSavedBeforeLeave())) return
   const record = currentRequests.value.find((item) => item.id === id) ?? null
   loadRecord(record)
+  ensureTab(id)
   saveSelection()
 }
 
@@ -700,7 +736,9 @@ async function switchProject(projectId: string): Promise<void> {
   if (!(await ensureSavedBeforeLeave())) return
   currentProjectId.value = projectId
   const project = projects.value.find((item) => item.id === projectId)
+  openTabs.value = []
   loadRecord(project?.requests[0] ?? null)
+  if (project?.requests[0]) ensureTab(project.requests[0].id)
   saveSelection()
 }
 
@@ -725,6 +763,7 @@ async function createRequest(folderId: string | null = null): Promise<void> {
     applyProjects(result.projects)
     currentProjectId.value = project.id
     loadRecord(result.record)
+    ensureTab(result.record.id)
     saveSelection()
     ElMessage.success(`已创建请求「${result.record.name}」`)
   } catch (error) {
@@ -776,6 +815,7 @@ async function deleteRequest(id: string): Promise<void> {
     const next = await window.api.projects.removeRequest(project.id, id)
     applyProjects(next)
     responseCache.delete(id)
+    openTabs.value = openTabs.value.filter((item) => item !== id)
     if (currentRequestId.value === id) {
       const remaining = next.find((item) => item.id === project.id)?.requests[0] ?? null
       loadRecord(remaining)
@@ -1454,6 +1494,7 @@ async function loadAll(): Promise<void> {
     const record =
       project?.requests.find((item) => item.id === selection.requestId) ?? project?.requests[0] ?? null
     loadRecord(record)
+    if (record) ensureTab(record.id)
     saveSelection()
   } catch (error) {
     ElMessage.error(`读取请求数据失败：${(error as Error).message}`)
@@ -1578,6 +1619,23 @@ onUnmounted(() => {
       </div>
 
       <div v-else class="api-main">
+        <!-- 同时打开的请求：Tab 切换 -->
+        <div class="req-tabs">
+          <div
+            v-for="tab in openTabItems"
+            :key="tab.id"
+            class="req-tab"
+            :class="{ active: tab.id === activeTabId }"
+            :title="`${tab.record.method} ${tab.record.url || tab.record.name}`"
+            @click="selectRequest(tab.id)"
+          >
+            <span class="req-tab-method" :class="`m-${tab.record.method.toLowerCase()}`">{{ tab.record.method }}</span>
+            <span class="req-tab-name">{{ tab.record.name }}</span>
+            <button class="req-tab-close" type="button" title="关闭" @click.stop="closeTab(tab.id)">×</button>
+          </div>
+          <button class="req-tab-add" type="button" title="新建请求" @click="createRequest()">＋</button>
+        </div>
+
         <div class="name-bar">
           <span class="small muted bar-label-inline">名称</span>
           <el-input
@@ -2025,6 +2083,106 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ---------------- 顶部请求 Tab ---------------- */
+.req-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+  scrollbar-width: thin;
+}
+
+.req-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 5px 8px 5px 10px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--el-fill-color-blank, #fff);
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.req-tab:hover {
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+
+.req-tab.active {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  border-color: var(--el-color-primary-light-5, #a0cfff);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.req-tab-method {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.req-tab-method.m-get {
+  color: #107c41;
+}
+.req-tab-method.m-post {
+  color: #b8860b;
+}
+.req-tab-method.m-put {
+  color: #1565c0;
+}
+.req-tab-method.m-delete {
+  color: #c62828;
+}
+.req-tab-method.m-patch {
+  color: #6a1b9a;
+}
+
+.req-tab-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.req-tab-close {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.req-tab-close:hover {
+  opacity: 1;
+}
+
+.req-tab-add {
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  border-radius: 8px;
+  width: 26px;
+  height: 24px;
+  line-height: 1;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.req-tab-add:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+}
+
 .api-page {
   gap: 10px;
 }
