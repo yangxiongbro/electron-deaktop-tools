@@ -446,12 +446,44 @@ function buildDefaultProject(now = Date.now()): ApiProject {
   }
 }
 
+/**
+ * 把导入文件的字节解码成文本。
+ *
+ * 之前固定按 UTF-8 读：Windows 上用别的工具另存的 UTF-16 / GBK 文件会解出乱码，
+ * 于是报「不是合法的 JSON」。这里按 BOM 和非法字节自动判断编码。
+ */
+function decodeImportText(buffer: Buffer): string {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(buffer.subarray(2))
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(buffer.subarray(2))
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return stripBom(buffer.subarray(3).toString('utf8'))
+  }
+  const utf8 = buffer.toString('utf8')
+  if (!utf8.includes('\uFFFD')) return stripBom(utf8)
+  try {
+    // Electron 自带完整 ICU，可以解 GBK/GB18030
+    const gbk = new TextDecoder('gb18030').decode(buffer)
+    if (!gbk.includes('\uFFFD')) return stripBom(gbk)
+  } catch {
+    // 环境不支持就回退 UTF-8
+  }
+  return stripBom(utf8)
+}
+
 function parseProjectsFile(text: string): ApiProject[] {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
-  } catch {
-    throw new Error('不是合法的 JSON 文件（只支持 DevToolbox 导出的 JSON）')
+  } catch (error) {
+    const sample = text.slice(0, 80).replace(/\s+/g, ' ')
+    throw new Error(
+      `不是合法的 JSON 文件（只支持 DevToolbox 导出的 JSON）。文件开头：${sample || '（空文件）'}` +
+        `（${(error as Error).message}）`
+    )
   }
 
   const now = Date.now()
@@ -901,7 +933,7 @@ export async function importProjectsFrom(
   const stat = await fsp.stat(filePath)
   if (stat.size > IMPORT_MAX_BYTES) throw new Error('文件过大，无法导入')
 
-  const text = stripBom(await fsp.readFile(filePath, 'utf8'))
+  const text = decodeImportText(await fsp.readFile(filePath))
   const incoming = parseProjectsFile(text)
   if (!incoming.length) throw new Error('文件中没有可导入的项目')
 

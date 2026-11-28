@@ -1,5 +1,6 @@
 import { hostname } from 'node:os'
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
+import { existsSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
@@ -356,11 +357,17 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('projects:import', async (event): Promise<ApiImportResult> => {
     const win = BrowserWindow.fromWebContents(event.sender)
-    const args = {
+    const downloadDir = loadSettings().downloadDir
+    const args: Electron.OpenDialogOptions = {
       title: '导入请求数据',
-      defaultPath: loadSettings().downloadDir,
-      filters: [{ name: 'JSON 文件', extensions: ['json'] }],
-      properties: ['openFile' as const]
+      // 目录不存在时不要塞 defaultPath：有些 Linux 桌面环境会因此直接打不开对话框
+      defaultPath: downloadDir && existsSync(downloadDir) ? downloadDir : undefined,
+      // 加上「所有文件」：GTK 的扩展名过滤区分大小写，.JSON 会被灰掉选不中
+      filters: [
+        { name: 'JSON 文件', extensions: ['json'] },
+        { name: '所有文件', extensions: ['*'] }
+      ],
+      properties: ['openFile']
     }
     const result = win ? await dialog.showOpenDialog(win, args) : await dialog.showOpenDialog(args)
     if (result.canceled || result.filePaths.length === 0) return { canceled: true }
@@ -374,7 +381,8 @@ export function registerIpcHandlers(): void {
         importedRequests: summary.importedRequests
       }
     } catch (error) {
-      return { canceled: false, error: (error as Error).message }
+      // 把文件路径也带出来，方便用户把错误信息直接发过来定位
+      return { canceled: false, error: `${(error as Error).message}（文件：${filePath}）` }
     }
   })
 
