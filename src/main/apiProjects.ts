@@ -981,7 +981,9 @@ function mergeProjects(
   let requestCount = 0
 
   for (const source of incoming) {
-    let target = projects.find((item) => item.id === source.id) ?? projects.find((item) => item.name === source.name)
+    // 只按 id 合并：不同机器上导出的项目 id 不同，即使同名也应当作为独立项目导入，
+    // 否则会被静默并进本机同名项目，用户根本看不到「导出/导入」的变化
+    let target = projects.find((item) => item.id === source.id)
 
     if (!target) {
       const project: ApiProject = {

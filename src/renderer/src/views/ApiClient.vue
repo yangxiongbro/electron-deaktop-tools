@@ -1114,7 +1114,10 @@ async function importProjects(): Promise<void> {
   // 先把未保存的改动刷盘；失败也不阻塞导入（否则点了没反应）
   await flushSave().catch(() => undefined)
   try {
-    const beforeIds = new Set(projects.value.map((item) => item.id))
+    const beforeProjectIds = new Set(projects.value.map((item) => item.id))
+    const beforeRequestIds = new Set(
+      projects.value.flatMap((item) => item.requests.map((request) => request.id))
+    )
     const result = await window.api.projects.importFile()
     if (result.canceled) return
     if (result.error) {
@@ -1132,19 +1135,38 @@ async function importProjects(): Promise<void> {
       return
     }
 
-    // 切到新导入的项目，让用户立刻看到结果
-    const added = projects.value.find((item) => !beforeIds.has(item.id))
-    if (added) {
-      currentProjectId.value = added.id
+    // 定位到「新导入进来的第一条请求」：不管它落在新项目还是既有项目里，
+    // 直接把用户带到那里，避免"导入成功但看不到数据"
+    let focusProject: ApiProject | null = null
+    let focusRequestId = ''
+    for (const project of projects.value) {
+      const fresh = project.requests.find((request) => !beforeRequestIds.has(request.id))
+      if (fresh) {
+        focusProject = project
+        focusRequestId = fresh.id
+        break
+      }
+    }
+    if (!focusProject) {
+      focusProject = projects.value.find((item) => !beforeProjectIds.has(item.id)) ?? null
+      focusRequestId = focusProject?.requests[0]?.id ?? ''
+    }
+
+    if (focusProject) {
+      currentProjectId.value = focusProject.id
+      const record = focusProject.requests.find((item) => item.id === focusRequestId) ?? focusProject.requests[0] ?? null
       openTabs.value = []
-      loadRecord(added.requests[0] ?? null)
-      if (added.requests[0]) ensureTab(added.requests[0].id)
+      loadRecord(record)
+      if (record) ensureTab(record.id)
       saveSelection()
     } else {
       await reloadCurrentSelection()
     }
 
-    ElMessage.success(`导入完成：新增 ${importedProjects} 个项目、${importedRequests} 条请求`)
+    ElMessage.success(
+      `导入完成：${importedProjects} 个新项目、${importedRequests} 条新请求` +
+        (focusProject ? `，已打开「${focusProject.name}」` : '')
+    )
   } catch (error) {
     ElMessage.error(`导入失败：${(error as Error).message}`)
   }
