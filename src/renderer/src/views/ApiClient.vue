@@ -1111,21 +1111,40 @@ async function exportProjects(): Promise<void> {
 }
 
 async function importProjects(): Promise<void> {
-  await flushSave()
+  // 先把未保存的改动刷盘；失败也不阻塞导入（否则点了没反应）
+  await flushSave().catch(() => undefined)
   try {
+    const beforeIds = new Set(projects.value.map((item) => item.id))
     const result = await window.api.projects.importFile()
     if (result.canceled) return
     if (result.error) {
       ElMessage.error(`导入失败：${result.error}`)
       return
     }
-    if (result.projects) {
-      applyProjects(result.projects)
+
+    const importedProjects = result.importedProjects ?? 0
+    const importedRequests = result.importedRequests ?? 0
+    if (result.projects) applyProjects(result.projects)
+
+    // 没有任何新增：说明文件里的项目 / 请求本机都有了（例如导出的就是本机数据）
+    if (importedProjects === 0 && importedRequests === 0) {
+      ElMessage.warning('没有新增内容：文件里的项目和请求本机都已经存在')
+      return
+    }
+
+    // 切到新导入的项目，让用户立刻看到结果
+    const added = projects.value.find((item) => !beforeIds.has(item.id))
+    if (added) {
+      currentProjectId.value = added.id
+      openTabs.value = []
+      loadRecord(added.requests[0] ?? null)
+      if (added.requests[0]) ensureTab(added.requests[0].id)
+      saveSelection()
+    } else {
       await reloadCurrentSelection()
     }
-    ElMessage.success(
-      `导入完成：新增 ${result.importedProjects ?? 0} 个项目、${result.importedRequests ?? 0} 条请求`
-    )
+
+    ElMessage.success(`导入完成：新增 ${importedProjects} 个项目、${importedRequests} 条请求`)
   } catch (error) {
     ElMessage.error(`导入失败：${(error as Error).message}`)
   }

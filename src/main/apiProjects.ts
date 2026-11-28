@@ -451,7 +451,7 @@ function parseProjectsFile(text: string): ApiProject[] {
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error('数据文件不是合法的 JSON')
+    throw new Error('不是合法的 JSON 文件（只支持 DevToolbox 导出的 JSON）')
   }
 
   const now = Date.now()
@@ -476,7 +476,7 @@ function parseProjectsFile(text: string): ApiProject[] {
   }
 
   if (!isObject(parsed) || !Array.isArray(parsed.projects)) {
-    throw new Error('数据文件格式无法识别（缺少 projects 字段）')
+    throw new Error('格式无法识别：只支持 DevToolbox「导出全部数据」生成的 JSON（或旧版 api-history.json）')
   }
 
   // 4 之前「按创建时间」和「手动排序」是两种模式，升级时统一按创建时间重排一次
